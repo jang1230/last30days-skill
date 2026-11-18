@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, env, http, naver, normalize, pipeline, planner, schema, signals
+from lib import cjk, dedupe, env, http, naver, normalize, pipeline, planner, render, schema, signals
 from lib.relevance import token_overlap_relevance
 
 
@@ -794,3 +794,33 @@ def test_a_mock_run_that_does_not_ask_for_naver_leaves_it_out():
     report = pipeline.run(topic="galaxy fold", config={}, depth="quick", mock=True)
     assert "naver" not in report.items_by_source
     assert all("naver" not in subquery.sources for subquery in report.query_plan.subqueries)
+
+
+# --- rendering ---------------------------------------------------------------
+
+def test_naver_has_a_label_and_a_footer_row_without_engagement_columns():
+    assert render.SOURCE_LABELS["naver"] == "Naver"
+    assert render._source_label("naver") == "Naver"
+    rows = {key: (label, noun, fields) for key, _emoji, label, noun, fields in render._FOOTER_SOURCES}
+    assert rows["naver"] == ("Naver", "result", [])
+
+
+def test_a_briefing_shows_naver_results():
+    report = pipeline.run(topic="galaxy fold", config={}, depth="quick", requested_sources=["naver", "reddit"], mock=True)
+
+    compact = render.render_compact(report)
+    assert "Naver: 2 results" in compact
+    assert "[naver] galaxy fold news report" in compact
+    assert "| Naver News |" in compact
+    assert "| Naver Blog |" in compact
+    assert "https://blog.naver.com/example/galaxy-fold" in compact
+
+    full = render.render_full(report)
+    assert "### Naver (2 items)" in full
+    assert "*Naver Blog*" in full
+
+
+def test_a_briefing_without_naver_does_not_mention_it():
+    report = pipeline.run(topic="galaxy fold", config={}, depth="quick", mock=True)
+    assert "naver" not in render.render_compact(report).lower()
+    assert "naver" not in render.render_full(report).lower()

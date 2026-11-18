@@ -242,6 +242,7 @@ SOURCE_LABELS = {
     "grounding": "Web",
     "hackernews": "Hacker News",
     "devto": "dev.to",
+    "naver": "Naver",
     "truthsocial": "Truth Social",
     "linkedin": "LinkedIn",
     "xiaohongshu": "Xiaohongshu",
@@ -1908,6 +1909,7 @@ def render_full(report: schema.Report, save_path: str | None = None) -> str:
         "pinterest",
         "hackernews",
         "devto",
+        "naver",
         "bluesky",
         "truthsocial",
         "polymarket",
@@ -3335,6 +3337,8 @@ _FOOTER_SOURCES: list[tuple[str, str, str, str, list[tuple[str, str]]]] = [
         [("points", "points"), ("comments", "comments")],
     ),
     ("devto", "👩‍💻", "dev.to", "article", [("reactions", "reactions"), ("comments", "comments")]),
+    # Blog posts and news articles; the search API returns no reaction counts.
+    ("naver", "🟢", "Naver", "result", []),
     ("bluesky", "🦋", "Bluesky", "post", [("likes", "likes"), ("reposts", "reposts")]),
     (
         "truthsocial",

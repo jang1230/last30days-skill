@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, env, http, naver, normalize, signals
+from lib import cjk, dedupe, env, http, naver, normalize, planner, signals
 from lib.relevance import token_overlap_relevance
 
 
@@ -614,3 +614,15 @@ def test_on_the_same_day_the_more_relevant_naver_item_ranks_first(monkeypatch):
     assert [item.url.rsplit("/", 1)[-1] for item in ranked] == ["1", "2"]
     assert ranked[0].freshness == ranked[1].freshness
     assert ranked[0].local_relevance > ranked[1].local_relevance > 0
+
+
+# --- planning --------------------------------------------------------------
+
+def test_the_planner_knows_what_naver_offers():
+    assert planner.SOURCE_CAPABILITIES["naver"] == {"discussion", "link", "reference"}
+
+
+@pytest.mark.parametrize("intent", ["how_to", "comparison", "opinion", "breaking_news"])
+def test_an_available_naver_is_a_default_source_for_every_intent(intent):
+    sources = planner._default_sources_for_intent(intent, ["reddit", "youtube", "naver"])
+    assert "naver" in sources

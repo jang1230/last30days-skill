@@ -146,6 +146,8 @@ SOURCE_CAPABILITIES = {
     "instagram": {"video", "video_shortform", "social"},
     "hackernews": {"discussion", "link"},
     "devto": {"discussion", "link", "reference"},
+    # Blog posts read as first-hand discussion; news is reporting to cite.
+    "naver": {"discussion", "link", "reference"},
     "bluesky": {"discussion", "social"},
     "truthsocial": {"discussion", "social"},
     "polymarket": {"market"},

@@ -1,0 +1,1 @@
+Korean topics score relevance and de-duplicate correctly when the optional `jieba` package is installed. jieba emits Hangul one syllable at a time and single-character tokens are dropped, so every Korean query scored the same against on-topic and off-topic text; Hangul now always takes the bigram path.

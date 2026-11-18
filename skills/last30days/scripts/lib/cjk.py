@@ -30,6 +30,7 @@ from typing import List
 _CJK_CHARS = r"㐀-䶿一-鿿豈-﫿぀-ヿ가-힯"
 _CJK_RE = re.compile(f"[{_CJK_CHARS}]")
 _CJK_RUN_RE = re.compile(f"[{_CJK_CHARS}]+")
+_HANGUL_RUN_RE = re.compile("[\uac00-\ud7af]+")
 _LATIN_RE = re.compile(r"\w+")
 
 # High-frequency Chinese function words that dilute overlap signal, mirroring
@@ -71,16 +72,39 @@ def has_cjk(text: str) -> bool:
     return bool(text) and _CJK_RE.search(text) is not None
 
 
+def _bigrams(run: str) -> List[str]:
+    # Dictionary-free segmentation: character bigrams (single char if run
+    # length 1).
+    if len(run) <= 1:
+        return [run] if run else []
+    return [run[i:i + 2] for i in range(len(run) - 1)]
+
+
+def _jieba_tokens(run: str) -> List[str]:
+    return [w for w in _jieba.cut(run) if w.strip() and _CJK_RE.search(w)]
+
+
 def _cjk_tokens(run: str) -> List[str]:
     # Reads the module-global _jieba at call time, so tests can force the bigram
     # path deterministically by setting cjk._jieba = None regardless of whether
     # jieba is installed in the environment.
-    if _jieba is not None:
-        return [w for w in _jieba.cut(run) if w.strip() and _CJK_RE.search(w)]
-    # Dictionary-free fallback: character bigrams (single char if run length 1).
-    if len(run) <= 1:
-        return [run] if run else []
-    return [run[i:i + 2] for i in range(len(run) - 1)]
+    if _jieba is None:
+        return _bigrams(run)
+    # jieba's dictionary is Chinese. It emits Hangul one syllable at a time,
+    # and the relevance and dedupe tokenizers drop single-character tokens, so
+    # Korean text would be left with no tokens at all. Hangul stretches take
+    # the bigram path whether or not jieba is installed; the rest of the run
+    # still goes to jieba.
+    out: List[str] = []
+    pos = 0
+    for match in _HANGUL_RUN_RE.finditer(run):
+        if match.start() > pos:
+            out.extend(_jieba_tokens(run[pos:match.start()]))
+        out.extend(_bigrams(match.group()))
+        pos = match.end()
+    if pos < len(run):
+        out.extend(_jieba_tokens(run[pos:]))
+    return out
 
 
 def segment(text: str) -> List[str]:

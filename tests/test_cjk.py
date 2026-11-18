@@ -82,6 +82,67 @@ class TestChineseDedupe(_BigramBase):
         self.assertLess(sim, 0.3)
 
 
+class _JiebaLike:
+    """Segments the way jieba does without needing it installed: a known
+    Chinese word comes back whole, and everything its dictionary does not
+    cover (Hangul included) comes back one character at a time."""
+
+    WORDS = ("大模型", "测评")
+
+    def __init__(self):
+        self.seen = []
+
+    def cut(self, run):
+        self.seen.append(run)
+        pos = 0
+        while pos < len(run):
+            word = next((w for w in self.WORDS if run.startswith(w, pos)), run[pos])
+            yield word
+            pos += len(word)
+
+
+class TestHangulWithJiebaInstalled(unittest.TestCase):
+    """jieba emits Hangul syllable by syllable, and the tokenizers drop
+    single-character tokens, so Korean must not be routed through it."""
+
+    def setUp(self):
+        self.jieba = _JiebaLike()
+        patcher = patch.object(cjk, "_jieba", self.jieba)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_hangul_is_bigrammed_not_sent_to_jieba(self):
+        self.assertEqual(cjk.segment("갤럭시 폴드"), ["갤럭", "럭시", "폴드"])
+        self.assertEqual(self.jieba.seen, [])
+
+    def test_hangul_segments_the_same_with_and_without_jieba(self):
+        text = "삼성 갤럭시 폴드를 한 달 써 본 후기"
+        with_jieba = cjk.segment(text)
+        with patch.object(cjk, "_jieba", None):
+            without_jieba = cjk.segment(text)
+        self.assertEqual(with_jieba, without_jieba)
+
+    def test_chinese_still_goes_to_jieba(self):
+        self.assertEqual(cjk.segment("大模型测评"), ["大模型", "测评"])
+        self.assertEqual(self.jieba.seen, ["大模型测评"])
+
+    def test_a_run_mixing_hangul_and_chinese_splits_at_the_boundary(self):
+        self.assertEqual(cjk.segment("大模型갤럭시测评"), ["大模型", "갤럭", "럭시", "测评"])
+        self.assertEqual(self.jieba.seen, ["大模型", "测评"])
+
+    def test_korean_relevance_separates_on_topic_from_off_topic(self):
+        q = relevance.PreparedQuery("갤럭시 폴드 후기")
+        self.assertGreater(relevance.token_overlap_relevance(q, "갤럭시 폴드를 한 달 써 본 솔직한 후기입니다"), 0.5)
+        self.assertEqual(relevance.token_overlap_relevance(q, "오늘 점심은 김치찌개를 먹었습니다"), 0.0)
+
+    def test_korean_near_duplicates_are_detected(self):
+        self.assertGreater(
+            dedupe.token_jaccard("삼성 갤럭시 폴드 신제품 후기 쏟아져", "삼성 갤럭시 폴드 신제품 후기 쏟아져 (종합)"),
+            0.7,
+        )
+        self.assertEqual(dedupe.token_jaccard("삼성 갤럭시 폴드 후기", "오늘 점심 김치찌개 맛집"), 0.0)
+
+
 class TestJiebaBinding(unittest.TestCase):
     def test_jieba_global_is_bound_at_import(self):
         # Eager import binds the module global once (None when jieba absent).

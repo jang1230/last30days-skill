@@ -715,6 +715,16 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
         # explicit key in a `.env` file or the keychain. Registered here so
         # those layers reach the gate and the subprocess environment alike.
         ('BRIGHTDATA_API_KEY', None),
+        # Naver search (the naver source). Two platforms serve the same API
+        # with keys that are not interchangeable: NAVER API HUB on NAVER Cloud
+        # Platform, and Naver Developers. lib/naver.py picks the pair that is
+        # complete, API HUB first. Deliberately not in KEYCHAIN_KEYS: every
+        # key listed there costs each pass/Keychain user one more lookup per
+        # run, including the runs that never ask for Naver.
+        ('NCP_APIGW_API_KEY_ID', None),
+        ('NCP_APIGW_API_KEY', None),
+        ('NAVER_CLIENT_ID', None),
+        ('NAVER_CLIENT_SECRET', None),
         # Amazon marketplace the amazon source searches. Non-US users point
         # this at their own storefront (e.g. https://www.amazon.co.uk).
         ('LAST30DAYS_AMAZON_DOMAIN', 'https://www.amazon.com'),

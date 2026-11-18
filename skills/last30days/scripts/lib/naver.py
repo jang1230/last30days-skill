@@ -311,6 +311,10 @@ def search_naver(
     if not query:
         return result
 
+    # A fixture recording scrubs secret-named values on its own; the client
+    # id is not secret-named, so both values are registered here. A no-op
+    # outside a recording session.
+    http.add_fixture_redactions(credentials[1:])
     paging_deadline = time.monotonic() + PAGING_BUDGET_SECONDS
     keep = KEEP_PER_KIND.get(depth, KEEP_PER_KIND["default"])
     seen_urls: set[str] = set()

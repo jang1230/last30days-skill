@@ -2,10 +2,11 @@
 
 import datetime
 import urllib.parse
+from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, http, naver
+from lib import cjk, dedupe, env, http, naver
 from lib.relevance import token_overlap_relevance
 
 
@@ -135,6 +136,52 @@ def test_a_half_set_api_hub_pair_falls_back_to_a_complete_developers_pair():
         "NAVER_CLIENT_SECRET": "fake-legacy-secret",
     }
     assert naver.resolve_credentials(config) == LEGACY
+
+
+NAVER_CONFIG_KEYS = ("NCP_APIGW_API_KEY_ID", "NCP_APIGW_API_KEY", "NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET")
+
+
+def _load_config(tmp_path, monkeypatch, env_text=""):
+    config_file = tmp_path / ".env"
+    config_file.write_text(env_text, encoding="utf-8")
+    config_file.chmod(0o600)
+    monkeypatch.setenv("LAST30DAYS_CONFIG_DIR", str(tmp_path))
+    for key in NAVER_CONFIG_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(env, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(env, "CONFIG_FILE", config_file)
+    monkeypatch.chdir(tmp_path)
+    with mock.patch.object(env, "_load_keychain", return_value={}), mock.patch.object(env, "_load_pass", return_value={}):
+        return env.get_config()
+
+
+def test_naver_keys_load_from_the_env_file(tmp_path, monkeypatch):
+    config = _load_config(
+        tmp_path, monkeypatch,
+        "NCP_APIGW_API_KEY_ID=fake-hub-id\nNCP_APIGW_API_KEY=fake-hub-secret\n",
+    )
+    assert naver.resolve_credentials(config) == HUB
+
+
+def test_naver_keys_are_registered_but_unset_by_default(tmp_path, monkeypatch):
+    config = _load_config(tmp_path, monkeypatch)
+    for key in NAVER_CONFIG_KEYS:
+        assert key in config and config[key] is None
+    assert naver.is_available(config) is False
+
+
+def test_naver_keys_add_no_keychain_or_pass_lookups():
+    # Every KEYCHAIN_KEYS entry is one more lookup per run for each Keychain
+    # or pass user, including on runs that never ask for Naver.
+    assert not set(NAVER_CONFIG_KEYS) & set(env.KEYCHAIN_KEYS)
+
+
+def test_both_key_values_are_registered_for_fixture_redaction(monkeypatch):
+    registered = []
+    monkeypatch.setattr(naver.http, "add_fixture_redactions", lambda values: registered.extend(values))
+    _install(monkeypatch, FakeApi())
+    _search(credentials=HUB)
+    assert registered == ["fake-hub-id", "fake-hub-secret"]
 
 
 def test_search_without_credentials_reports_an_error_and_makes_no_request(monkeypatch):

@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, env, http, naver, normalize, planner, signals
+from lib import cjk, dedupe, env, http, naver, normalize, pipeline, planner, schema, signals
 from lib.relevance import token_overlap_relevance
 
 
@@ -626,3 +626,171 @@ def test_the_planner_knows_what_naver_offers():
 def test_an_available_naver_is_a_default_source_for_every_intent(intent):
     sources = planner._default_sources_for_intent(intent, ["reddit", "youtube", "naver"])
     assert "naver" in sources
+
+
+# --- pipeline: availability -------------------------------------------------
+
+FAKE_HUB_CONFIG = {"NCP_APIGW_API_KEY_ID": "fake-hub-id", "NCP_APIGW_API_KEY": "fake-hub-secret"}
+FAKE_LEGACY_CONFIG = {"NAVER_CLIENT_ID": "fake-legacy-id", "NAVER_CLIENT_SECRET": "fake-legacy-secret"}
+
+
+def _available(config, requested=None):
+    return pipeline.available_sources(dict(config), requested, x_pending=False)
+
+
+def test_naver_is_off_by_default():
+    assert "naver" not in _available({})
+
+
+@pytest.mark.parametrize("keys", [FAKE_HUB_CONFIG, FAKE_LEGACY_CONFIG])
+def test_keys_alone_do_not_turn_naver_on(keys):
+    assert "naver" not in _available(keys)
+
+
+@pytest.mark.parametrize("keys", [FAKE_HUB_CONFIG, FAKE_LEGACY_CONFIG])
+def test_include_sources_and_search_each_activate_naver_when_keys_are_set(keys):
+    assert "naver" in _available({**keys, "INCLUDE_SOURCES": "tiktok, Naver"})
+    assert "naver" in _available(keys, ["naver"])
+
+
+def test_without_credentials_naver_is_unavailable_even_when_asked_for():
+    assert "naver" not in _available({"INCLUDE_SOURCES": "naver"})
+    assert "naver" not in _available({}, ["naver"])
+    # Half a pair is not a credential.
+    assert "naver" not in _available({"NCP_APIGW_API_KEY_ID": "fake-hub-id"}, ["naver"])
+
+
+def test_exclude_sources_beats_the_opt_in():
+    config = {**FAKE_HUB_CONFIG, "INCLUDE_SOURCES": "naver", "EXCLUDE_SOURCES": "naver"}
+    assert "naver" not in _available(config)
+    assert "naver" not in _available(config, ["naver"])
+
+
+def test_the_search_flag_accepts_naver():
+    import last30days as cli
+
+    assert cli.parse_search_flag("reddit,Naver") == ["reddit", "naver"]
+
+
+# --- pipeline: planning ------------------------------------------------------
+
+def _plan(sources):
+    return schema.QueryPlan(
+        intent="concept",
+        freshness_mode="balanced_recent",
+        cluster_mode="none",
+        raw_topic=TOPIC,
+        subqueries=[schema.SubQuery(label="primary", search_query=TOPIC,
+                                    ranking_query=TOPIC, sources=list(sources), weight=1.0)],
+        source_weights={source: 1.0 for source in sources},
+    )
+
+
+def test_an_activated_naver_joins_an_engine_plan_that_omits_it():
+    plan = _plan(["reddit"])
+    pipeline._ensure_naver_in_plan(plan, ["reddit", "naver"])
+    assert plan.subqueries[0].sources == ["reddit", "naver"]
+    assert plan.source_weights["naver"] == plan.source_weights["reddit"]
+
+
+def test_an_inactive_naver_is_not_added_to_a_plan():
+    plan = _plan(["reddit"])
+    pipeline._ensure_naver_in_plan(plan, ["reddit"])
+    assert plan.subqueries[0].sources == ["reddit"]
+    assert "naver" not in plan.source_weights
+
+
+def test_an_existing_naver_route_is_left_alone():
+    plan = _plan(["reddit"])
+    plan.subqueries.append(schema.SubQuery(label="focused", search_query="갤럭시 폴드 내구성",
+                                           ranking_query="q", sources=["naver"], weight=1.0))
+    pipeline._ensure_naver_in_plan(plan, ["reddit", "naver"])
+    assert plan.subqueries[0].sources == ["reddit"]
+    assert plan.subqueries[1].sources == ["naver"]
+
+
+def test_an_activated_naver_joins_a_host_plan_that_omits_it():
+    plan = _plan(["reddit"])
+    pipeline._ensure_unplanned_lanes_in_host_plan(plan, ["reddit", "naver"])
+    assert "naver" in plan.subqueries[0].sources
+    assert "naver" in plan.source_weights
+
+
+def test_a_host_plan_without_an_available_naver_is_untouched():
+    plan = _plan(["reddit"])
+    pipeline._ensure_unplanned_lanes_in_host_plan(plan, ["reddit"])
+    assert plan.subqueries[0].sources == ["reddit"]
+
+
+# --- pipeline: retrieval -----------------------------------------------------
+
+def _retrieve(config, **overrides):
+    subquery = schema.SubQuery(label="primary", search_query="갤럭시 폴드", ranking_query=TOPIC, sources=["naver"])
+    return pipeline._retrieve_stream_impl(
+        topic=TOPIC,
+        subquery=subquery,
+        source="naver",
+        config=dict(config),
+        depth="default",
+        date_range=(FROM_DATE, TO_DATE),
+        runtime=schema.ProviderRuntime(reasoning_provider="none", planner_model="none", rerank_model="none"),
+        mock=False,
+        **overrides,
+    )
+
+
+def test_the_pipeline_fetches_and_parses_naver_items(monkeypatch):
+    api = _install(monkeypatch, FakeApi(blog={1: [_blog(1)]}, news={1: [_news(7)]}))
+    items, artifact = _retrieve(FAKE_HUB_CONFIG)
+    assert [item["metadata"]["kind"] for item in items] == ["blog", "news"]
+    assert artifact == {}
+    # The subquery is what is searched; the topic is what relevance is judged on.
+    assert {call["query"]["query"] for call in api.calls} == {"갤럭시 폴드"}
+    assert all(call["headers"]["X-NCP-APIGW-API-KEY-ID"] == "fake-hub-id" for call in api.calls)
+    normalized = normalize.normalize_source_items("naver", items, FROM_DATE, TO_DATE)
+    assert [item.container for item in normalized] == ["Naver Blog", "Naver News"]
+
+
+def test_the_pipeline_keeps_one_kind_when_the_other_fails(monkeypatch):
+    _install(monkeypatch, FakeApi(blog={1: [_blog(1)]}, fail=("news",)))
+    items, artifact = _retrieve(FAKE_LEGACY_CONFIG)
+    assert [item["metadata"]["kind"] for item in items] == ["blog"]
+    assert artifact == {}
+
+
+def test_the_pipeline_reports_a_source_failure_when_every_kind_fails(monkeypatch):
+    _install(monkeypatch, FakeApi(fail=("blog", "news")))
+    items, artifact = _retrieve(FAKE_HUB_CONFIG)
+    assert items == []
+    assert artifact["_source_outcome"]["detail"] == "blog: down; news: down"
+
+
+def test_a_naver_stream_without_credentials_fails_without_a_request(monkeypatch):
+    api = _install(monkeypatch, FakeApi())
+    items, artifact = _retrieve({})
+    assert items == []
+    assert "not configured" in artifact["_source_outcome"]["detail"]
+    assert api.calls == []
+
+
+# --- pipeline: mock runs -----------------------------------------------------
+
+def test_mock_naver_rows_normalize():
+    subquery = schema.SubQuery(label="primary", search_query="galaxy fold", ranking_query="galaxy fold", sources=["naver"])
+    raw, artifact = pipeline._mock_stream_results("naver", subquery)
+    assert artifact == {}
+    window = pipeline.dates.get_date_range(30)
+    items = normalize.normalize_source_items("naver", raw, *window)
+    assert [item.container for item in items] == ["Naver Blog", "Naver News"]
+    assert all(item.engagement == {} for item in items)
+
+
+def test_a_mock_run_that_asks_for_naver_puts_it_in_the_report():
+    report = pipeline.run(topic="galaxy fold", config={}, depth="quick", requested_sources=["naver"], mock=True)
+    assert {item.container for item in report.items_by_source["naver"]} == {"Naver Blog", "Naver News"}
+
+
+def test_a_mock_run_that_does_not_ask_for_naver_leaves_it_out():
+    report = pipeline.run(topic="galaxy fold", config={}, depth="quick", mock=True)
+    assert "naver" not in report.items_by_source
+    assert all("naver" not in subquery.sources for subquery in report.query_plan.subqueries)

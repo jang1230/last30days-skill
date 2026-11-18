@@ -52,6 +52,7 @@ from . import (
     library_index,
     log,
     meta_ads,
+    naver,
     normalize,
     permission_preflight,
     perplexity,
@@ -382,6 +383,7 @@ MOCK_AVAILABLE_SOURCES = [
     "dripstack",
     "telegram",
     "devto",
+    "naver",
 ]
 
 
@@ -563,6 +565,13 @@ def available_sources(
         or (requested_sources and "xiaohongshu" in requested_sources)
     ) and env.is_xiaohongshu_available(config):
         available.append("xiaohongshu")
+    # Naver (Korean blogs and news): opt-in, and only with a complete key
+    # pair. A default run never contacts Naver, with or without keys.
+    if (
+        "naver" in include_sources
+        or (requested_sources and "naver" in requested_sources)
+    ) and naver.is_available(config):
+        available.append("naver")
     # Threads: opt-in via INCLUDE_SOURCES (same pattern as perplexity/linkedin).
     # Was auto-on with the key; gated so the onboarding "Everything" tier is a
     # real choice vs the "Recommended" (TikTok/Instagram) tier.
@@ -2454,6 +2463,10 @@ def run(
             available = [source for source in available if source != "corpus"]
         if not requested_sources and not hiring_signals_mode and not auto_company_jobs:
             available = [source for source in available if source != "jobs"]
+        if not requested_sources:
+            # Naver is opt-in on a real run, so an unrequested mock run
+            # leaves it out too and its output stays what it was.
+            available = [source for source in available if source != "naver"]
     else:
         runtime, reasoning_provider = providers.resolve_runtime(config, depth)
         available = available_sources(
@@ -2598,6 +2611,7 @@ def run(
             topic=topic,
         )
         _ensure_devto_in_plan(plan, available)
+        _ensure_naver_in_plan(plan, available)
     if "corpus" in available and plan.subqueries:
         # Corpus is deterministic and user-registered, so it always gets one
         # bounded stream even when a quick/LLM plan omits it. Reuse the primary
@@ -4616,6 +4630,22 @@ def _ensure_devto_in_plan(plan: schema.QueryPlan, available: list[str]) -> None:
         plan.source_weights = planner._normalize_weights(plan.source_weights)
 
 
+def _ensure_naver_in_plan(plan: schema.QueryPlan, available: list[str]) -> None:
+    """Give an activated Naver source the primary subquery.
+
+    Naver is off by default, so a planner that was not told about it never
+    names it. Once INCLUDE_SOURCES or --search turns it on, activation must
+    not be a no-op. A plan that already routes Naver keeps its routes.
+    """
+    if "naver" not in available or not plan.subqueries:
+        return
+    if not any("naver" in subquery.sources for subquery in plan.subqueries):
+        plan.subqueries[0].sources.append("naver")
+    if "naver" not in plan.source_weights:
+        plan.source_weights["naver"] = 1.0
+        plan.source_weights = planner._normalize_weights(plan.source_weights)
+
+
 # Sources that are available only because the user installed their CLI or opted
 # in (INCLUDE_SOURCES, --search, a targeting flag). A host plan that names none
 # of them in any subquery almost always means the host planner never knew to
@@ -4635,6 +4665,7 @@ HOST_PLAN_BACKFILL_SOURCES = (
     "linkedin",
     "dripstack",
     "devto",
+    "naver",
     "telegram",
     "trustpilot",
 )
@@ -7436,6 +7467,19 @@ def _retrieve_stream_impl(
         # Comment enrichment is deferred to _finalize_items_by_source so it
         # lands on the articles that survive relevance pruning.
         return items, _result_outcome_artifact(source, result)
+    if source == "naver":
+        # Relevance is judged against the whole topic, not the narrowed
+        # per-subquery search (same rationale as dev.to).
+        relevance_topic = raw_topic or topic or subquery.search_query
+        result = naver.search_naver(
+            relevance_topic, from_date, to_date, depth=depth,
+            credentials=naver.resolve_credentials(config),
+            search_query=subquery.search_query,
+        )
+        return (
+            naver.parse_naver_response(result, query=relevance_topic),
+            _result_outcome_artifact(source, result),
+        )
     if source == "stocktwits":
         # Pass raw_topic so symbol detection sees the full topic, not the
         # narrowed per-subquery search_query (same rationale as reddit).
@@ -7801,6 +7845,32 @@ def _mock_stream_results(source: str, subquery: schema.SubQuery) -> tuple[list[d
                 "engagement": {},
                 "relevance": 0.83,
                 "why_relevant": "Mock Techmeme headline",
+            },
+        ],
+        "naver": [
+            {
+                "id": f"naver-blog-{slug}",
+                "title": f"{subquery.search_query} blog review",
+                "url": f"https://blog.naver.com/example/{slug}",
+                "author": "Example Blog",
+                "date": dates.get_date_range(4)[0],
+                "text": f"A first-hand blog post about {subquery.search_query}.",
+                "engagement": {},
+                "relevance": 0.8,
+                "why_relevant": "Mock Naver blog result",
+                "metadata": {"kind": "blog", "blog_url": "blog.naver.com/example"},
+            },
+            {
+                "id": f"naver-news-{slug}",
+                "title": f"{subquery.search_query} news report",
+                "url": f"https://n.news.naver.com/mnews/article/001/{slug}",
+                "author": "news.example.com",
+                "date": dates.get_date_range(2)[0],
+                "text": f"News coverage of {subquery.search_query}.",
+                "engagement": {},
+                "relevance": 0.82,
+                "why_relevant": "Mock Naver news result",
+                "metadata": {"kind": "news"},
             },
         ],
         "dripstack": [

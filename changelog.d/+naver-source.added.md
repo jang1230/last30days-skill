@@ -1,0 +1,1 @@
+Add an opt-in `naver` source that searches Naver blogs and news, so Korean topics bring back Korean coverage. It runs only with `INCLUDE_SOURCES=naver` or `--search naver` and a NAVER API HUB key pair (`NCP_APIGW_API_KEY_ID` + `NCP_APIGW_API_KEY`) or a Naver Developers key pair (`NAVER_CLIENT_ID` + `NAVER_CLIENT_SECRET`); `doctor` reports its state and how to turn it on.

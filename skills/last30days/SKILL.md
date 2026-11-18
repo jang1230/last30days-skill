@@ -231,6 +231,7 @@ After the response and required citations, stop and wait unless governing instru
 - Accepts host `.json` envelopes as untrusted input: `--x-posts` (posts from the host's X connector; rows validated, citation URLs rebuilt from post ids; no X backend is called) and `--reddit-threads` (thread URLs or ids only; the engine rehydrates each)
 - Sends search queries to Algolia HN Search (`hn.algolia.com`) for Hacker News stories and comments (free, no auth)
 - dev.to API only on `--devto-tags`/`INCLUDE_SOURCES=devto`
+- Naver search API (`naverapihub.apigw.ntruss.com`, or `openapi.naver.com` with Naver Developers keys) only on `INCLUDE_SOURCES=naver`/`--search naver` with the user's Naver keys set: Korean blog and news search
 - Sends search queries to Polymarket Gamma API (`gamma-api.polymarket.com`) for prediction markets (free, no auth)
 - Sends the topic text to Wikidata (`www.wikidata.org`, no key) when it looks like a company or person's name; when installed, `yahoo-finance-pp-cli` sends Yahoo Finance a ticker and, to confirm it, the company name; company runs send USPTO patent search (`ppubs.uspto.gov`, no key) the company name
 - Runs `yt-dlp` locally for YouTube search and transcripts (no API key, public data)

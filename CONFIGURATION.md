@@ -200,6 +200,7 @@ The source table covers the engine's research sources and optional comment or tr
 | Meta Ads | `SCRAPECREATORS_API_KEY` + (`INCLUDE_SOURCES` contains `meta_ads` **or** `--search` includes `meta_ads`) | **opt-in, off by default**; a brand's live Meta Ad Library creatives that *launched* inside the window, with ad copy, launch date, placements, CTA, landing product, any promo code, and spoken transcripts for the newest video ads. The 📣 footer names the advertiser page that was resolved, plus how much the brand is still running from before. Paid message only, never audience reaction: Meta publishes reach and spend for political ads alone, so commercial creatives carry no engagement. `--meta-ads-page=<page_id>` skips name-based resolution when it picks the wrong company or the brand advertises under product-line page names; `LAST30DAYS_META_ADS_COUNTRY` selects a non-US Ad Library (one country per call). `EXCLUDE_SOURCES=meta_ads` wins. Never auto-fires and never inferred from topic shape: on a non-brand topic, resolution returns unrelated advertisers | 10K free calls; a default run spends at most 7 (1 resolve, plus 1 more only when the first search finds no name match, + up to 2 creative pages + up to 3 transcripts), billed per request. Power-user opt-in, not offered during first-run onboarding |
 | Telegram | `SCRAPECREATORS_API_KEY` + (`--telegram-sources=<handles>` **or** `TELEGRAM_SOURCES=<handles>` with `INCLUDE_SOURCES=telegram` or `--search telegram`) | **opt-in, off by default**; public channel posts only (no keyword discovery). `--telegram-sources=aipost,durov` auto-activates for that run; `TELEGRAM_SOURCES` alone does not. Accepts bare handle, `@handle`, `t.me/URL`, or `t.me/s/URL`; rejects joinchat links and numeric -100 IDs. `INCLUDE_SOURCES=telegram` or `--search telegram` without a channel list does not fetch. `EXCLUDE_SOURCES=telegram` wins. `TELEGRAM_MAX_PAGES` overrides page cap (quick=1, default=3, deep=6). Never on Recommended onboarding tier. | 1 credit per live posts page; 10K free calls |
 | Xiaohongshu (RED) | logged-in x-mcp browser plugin or `xiaohongshu-mcp` service; optional `XIAOHONGSHU_API_BASE` for custom URLs | requested-only via `--search xhs` or `--search xiaohongshu`; auto-probes `http://localhost:18060` then `http://host.docker.internal:18060` | no last30days API key; depends on your local browser-session service |
+| Naver (Korean blogs and news) | `NCP_APIGW_API_KEY_ID` + `NCP_APIGW_API_KEY` (NAVER API HUB) **or** `NAVER_CLIENT_ID` + `NAVER_CLIENT_SECRET` (Naver Developers), plus (`INCLUDE_SOURCES` contains `naver` **or** `--search` includes `naver`) | **opt-in, off by default**; Naver blog posts and news articles for the topic, inside the window. The search API returns no likes or comment counts, so items rank on relevance and recency alone. A default run never contacts Naver, with or without keys. See [Naver search](#naver-search-korean-blogs-and-news). | NAVER API HUB lists the search API as free for now, 25,000 calls a day |
 | Bluesky | `BSKY_HANDLE` + `BSKY_APP_PASSWORD` | Bluesky items | yes (app password at bsky.app) |
 | TruthSocial | `TRUTHSOCIAL_TOKEN` | TruthSocial items | yes |
 | Web search | one of: `BRAVE_API_KEY`, `EXA_API_KEY`, `SERPER_API_KEY`, `PARALLEL_API_KEY` | `--auto-resolve` and Step 2 supplements | Brave has a free tier; native WebSearch on Claude Code / Codex / Gemini works as a fallback |
@@ -271,6 +272,11 @@ INCLUDE_SOURCES=tiktok,instagram
 # Xiaohongshu is requested-only: run with --search xhs after starting a local
 # browser-session service. Defaults probe localhost, then host.docker.internal.
 # XIAOHONGSHU_API_BASE=http://localhost:18060
+# Naver (Korean blogs and news): add naver to INCLUDE_SOURCES and set one key
+# pair. NAVER API HUB keys shown; Naver Developers keys go in NAVER_CLIENT_ID
+# and NAVER_CLIENT_SECRET instead.
+# NCP_APIGW_API_KEY_ID=<your-naver-api-hub-client-id>
+# NCP_APIGW_API_KEY=<your-naver-api-hub-client-secret>
 # Add perplexity to INCLUDE_SOURCES when you want the paid Perplexity source.
 # PERPLEXITY_API_KEY=<your-perplexity-key>
 # INCLUDE_SOURCES=tiktok,instagram,perplexity
@@ -384,6 +390,38 @@ Perplexity-specific env vars:
 | `LAST30DAYS_PERPLEXITY_REASONING_EFFORT` | unset | controlled Agent profile | `minimal`, `low`, `medium`, or `high`. |
 | `LAST30DAYS_PERPLEXITY_DEEP_TIMEOUT_SECONDS` | `600` | direct Agent API background Deep Research | Wall-clock deadline for submission and polling. This lane keeps its own budget alongside ordinary sources. Remote work can continue after a local timeout. OpenRouter fallback is synchronous. |
 | `LAST30DAYS_PERPLEXITY_MODEL` / `LAST30DAYS_PERPLEXITY_SEARCH_MODE` | unset | legacy Sonar config | Retained for config-file compatibility. They do not select an Agent API preset or search mode. |
+
+### Naver search (Korean blogs and news)
+
+The `naver` source searches Naver blogs and Naver news, so a Korean topic brings back what people in Korea wrote about it. It is off by default and runs only when both of these hold:
+
+1. **A complete key pair is set.** Naver serves the same search API from two platforms, and their keys are not interchangeable:
+
+   | Platform | Keys | Where the keys come from |
+   |---|---|---|
+   | NAVER API HUB (NAVER Cloud Platform) | `NCP_APIGW_API_KEY_ID` + `NCP_APIGW_API_KEY` | NAVER Cloud Platform console → Application Services → NAVER API HUB → Application: register an Application with the Search API selected, then copy its Client ID and Client Secret |
+   | Naver Developers (`openapi.naver.com`) | `NAVER_CLIENT_ID` + `NAVER_CLIENT_SECRET` | an existing Naver Developers application that has the Search API |
+
+   When both pairs are complete, NAVER API HUB is used. One value of a pair on its own counts as no keys; `doctor` names the missing one.
+2. **The run asks for it:** `naver` in `INCLUDE_SOURCES`, or `--search naver` for one run. `EXCLUDE_SOURCES=naver` wins over both.
+
+```bash
+# ~/.config/last30days/.env
+NCP_APIGW_API_KEY_ID=<your-naver-api-hub-client-id>
+NCP_APIGW_API_KEY=<your-naver-api-hub-client-secret>
+INCLUDE_SOURCES=naver
+```
+
+What to expect:
+
+- **Blogs and news only.** Cafe posts are not searched: the API returns no date for them, so they cannot be placed in the window.
+- **No engagement numbers.** The search API returns no likes or comment counts. Naver items show none and rank on relevance and recency.
+- **Newest results first.** The API has no date-range parameter, so the engine asks for the newest results and keeps the ones inside the window: up to 100/200/300 results per kind at quick/default/deep depth, and up to the API's ceiling of 1,000 when the window ends before today. On a busy topic that reaches back hours or days, not the whole window.
+- **Dates are Korea time.** A blog post carries a day with no time of day, so days are compared as Naver states them, without conversion.
+- **Keys are read from the environment or `.env` only**, not from the Keychain or `pass` sources below.
+- **A 401 from NAVER API HUB** usually means the Search API is not enabled for that Application in the console, or that Naver Developers keys were put in the API HUB variables.
+
+`doctor` shows the source as `unconfigured` (no complete pair), `opt-in` (keys set, not asked for) or ready.
 
 ### Encrypted credential sources (Keychain / pass)
 
@@ -549,7 +587,7 @@ Outside a detected agent host nothing changes. The engine still plans internally
 
 ### What the engine adds to and checks on a host plan
 
-A `--plan`'s per-subquery `sources` stay final, with one exception: an installed or opted-in source (digg, arxiv, techmeme, bluesky, truthsocial, stocktwits, linkedin, dripstack, devto, telegram, trustpilot) that is available but named in no subquery is added to the first subquery at default and deep depth, and the engine logs a `[Planner]` line naming it. A lane that cannot run this session is not added: Trustpilot joins only when `--diagnose` reports `trustpilot_can_run` (a fresh browser session or a cached company record), or when the run names it with `--search trustpilot` or `--trustpilot-domain`. Host planners used to leave these out, so an installed `digg-pp-cli` was never searched on hosted runs. To keep one out deliberately, set `EXCLUDE_SOURCES` or restrict the run with `--search`. The paid lanes `amazon` and `meta_ads` are added the same way only when the run asks for them: the source is in `--search`, or its targeting flag (`--amazon-query`, `--meta-ads-page`) is set while the source is available. `INCLUDE_SOURCES=amazon` or `INCLUDE_SOURCES=meta_ads` alone makes the lane available without running it on a host plan; the engine then logs `[Amazon] available but not requested for this run; not run` (or the `[Meta Ads]` line).
+A `--plan`'s per-subquery `sources` stay final, with one exception: an installed or opted-in source (digg, arxiv, techmeme, bluesky, truthsocial, stocktwits, linkedin, dripstack, devto, naver, telegram, trustpilot) that is available but named in no subquery is added to the first subquery at default and deep depth, and the engine logs a `[Planner]` line naming it. A lane that cannot run this session is not added: Trustpilot joins only when `--diagnose` reports `trustpilot_can_run` (a fresh browser session or a cached company record), or when the run names it with `--search trustpilot` or `--trustpilot-domain`. Host planners used to leave these out, so an installed `digg-pp-cli` was never searched on hosted runs. To keep one out deliberately, set `EXCLUDE_SOURCES` or restrict the run with `--search`. The paid lanes `amazon` and `meta_ads` are added the same way only when the run asks for them: the source is in `--search`, or its targeting flag (`--amazon-query`, `--meta-ads-page`) is set while the source is available. `INCLUDE_SOURCES=amazon` or `INCLUDE_SOURCES=meta_ads` alone makes the lane available without running it on a host plan; the engine then logs `[Amazon] available but not requested for this run; not run` (or the `[Meta Ads]` line).
 
 On an agent-hosted run whose plan searches `x` for an entity-shaped topic (a short name such as `Jev` or `Peter Steinberger`, not a question or a theme), the engine exits 2 unless the command carries `--x-handle` or `--no-x-handle="<reason>"`. `--official-site=<domain>` lets the engine read the handle from the site's homepage links, with no API key; a handle you pass with `--x-handle` wins over the homepage. Quick runs, comparison runs, topics that already contain an `@handle`, and runs whose plan does not search X are exempt.
 

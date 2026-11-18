@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, env, http, naver, normalize, pipeline, planner, render, schema, signals
+from lib import cjk, dedupe, env, http, naver, normalize, pipeline, planner, render, schema, signals, ui
 from lib.relevance import token_overlap_relevance
 
 
@@ -824,3 +824,9 @@ def test_a_briefing_without_naver_does_not_mention_it():
     report = pipeline.run(topic="galaxy fold", config={}, depth="quick", mock=True)
     assert "naver" not in render.render_compact(report).lower()
     assert "naver" not in render.render_full(report).lower()
+
+
+def test_the_progress_display_names_naver():
+    assert "naver" in ui.SOURCE_COMPLETION_ORDER
+    assert ui.SOURCE_COMPLETION_META["naver"][:3] == ("Naver", "result", "results")
+    assert ui._completion_sources({"naver": 2, "reddit": 1}, None) == ["reddit", "naver"]

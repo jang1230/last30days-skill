@@ -54,7 +54,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from . import backends, brightdata, digg, env, health, http, prescriptions, reddit_health, trustpilot, x_api
+from . import backends, brightdata, digg, env, health, http, naver, prescriptions, reddit_health, trustpilot, x_api
 from .backends import TIER_ERROR, TIER_OK, TIER_WARN
 
 # Rollup tiers (R1). ok/warn/error are U2's; only "off" is doctor's own.
@@ -184,6 +184,7 @@ SOURCE_ORDER = (
     "linkedin",
     "pinterest",
     "xiaohongshu",
+    "naver",
     "jobs",
     "patents",
     "library",
@@ -1015,6 +1016,42 @@ def _xiaohongshu_record(config):
     )
 
 
+def _naver_record(config):
+    """Naver blog and news search: key-gated *and* opt-in.
+
+    Mirrors the pipeline gate so doctor and a run cannot disagree: a complete
+    key pair alone never activates the source, and an opt-in without a
+    complete pair cannot run. doctor makes no network call, so the keys are
+    reported as present, not as accepted.
+    """
+    requires = (
+        "NCP_APIGW_API_KEY_ID + NCP_APIGW_API_KEY (NAVER API HUB) or "
+        "NAVER_CLIENT_ID + NAVER_CLIENT_SECRET (Naver Developers); "
+        "INCLUDE_SOURCES=naver"
+    )
+    half_set = "; ".join(naver.incomplete_pairs(config))
+    credentials = naver.resolve_credentials(config)
+    if credentials is None:
+        return _record(
+            status="unconfigured", requires=requires,
+            fix=(
+                "set NCP_APIGW_API_KEY_ID and NCP_APIGW_API_KEY (NAVER Cloud "
+                "Platform console > NAVER API HUB > Application, with the "
+                "Search API enabled), then add naver to INCLUDE_SOURCES "
+                "(or request it via --search naver)"
+            ),
+            note=half_set,
+        )
+    detail = f"{naver.PROVIDER_LABELS[credentials.provider]} keys present (blog and news search)"
+    if "naver" in env.include_sources(config):
+        return _record(status=health.OK, requires=requires, detail=detail, note=half_set)
+    return _record(
+        status="opt-in", requires=requires, detail=detail,
+        fix="add naver to INCLUDE_SOURCES (or request it via --search naver)",
+        note="; ".join(part for part in ("keys present; opt-in, never auto-activates", half_set) if part),
+    )
+
+
 def _jobs_record(config):
     return _record(
         status="opt-in",
@@ -1116,6 +1153,7 @@ _SOURCE_BUILDERS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "linkedin": _linkedin_record,
     "pinterest": _pinterest_record,
     "xiaohongshu": _xiaohongshu_record,
+    "naver": _naver_record,
     "jobs": _jobs_record,
     "patents": _patents_record,
     "library": _library_record,

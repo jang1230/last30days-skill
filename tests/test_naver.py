@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, env, http, naver, normalize, pipeline, planner, render, schema, signals, ui
+from lib import cjk, dedupe, doctor, env, http, naver, normalize, pipeline, planner, render, schema, signals, ui
 from lib.relevance import token_overlap_relevance
 
 
@@ -830,3 +830,57 @@ def test_the_progress_display_names_naver():
     assert "naver" in ui.SOURCE_COMPLETION_ORDER
     assert ui.SOURCE_COMPLETION_META["naver"][:3] == ("Naver", "result", "results")
     assert ui._completion_sources({"naver": 2, "reddit": 1}, None) == ["reddit", "naver"]
+
+
+# --- doctor ------------------------------------------------------------------
+
+def test_doctor_lists_naver():
+    assert "naver" in doctor.SOURCE_ORDER
+    assert doctor._SOURCE_BUILDERS["naver"] is doctor._naver_record
+
+
+def test_doctor_reports_naver_as_unconfigured_and_says_how_to_turn_it_on():
+    record = doctor._naver_record({})
+    assert record["status"] == "unconfigured"
+    assert "NCP_APIGW_API_KEY_ID" in record["fix"]
+    assert "INCLUDE_SOURCES" in record["fix"]
+    assert "--search naver" in record["fix"]
+    assert "NAVER_CLIENT_ID" in record["requires"]
+
+
+@pytest.mark.parametrize("keys, label", [(FAKE_HUB_CONFIG, "NAVER API HUB"), (FAKE_LEGACY_CONFIG, "Naver Developers")])
+def test_doctor_reports_keys_without_the_opt_in_as_opt_in(keys, label):
+    record = doctor._naver_record(dict(keys))
+    assert record["status"] == "opt-in"
+    assert record["fix"] == "add naver to INCLUDE_SOURCES (or request it via --search naver)"
+    assert label in record["detail"]
+
+
+def test_doctor_reports_keys_with_the_opt_in_as_ok():
+    record = doctor._naver_record({**FAKE_HUB_CONFIG, "INCLUDE_SOURCES": "naver"})
+    assert record["status"] == "ok"
+    assert record["fix"] == ""
+
+
+def test_doctor_does_not_call_an_opt_in_without_keys_ready():
+    # The pipeline cannot run Naver without a complete pair; doctor must agree.
+    record = doctor._naver_record({"INCLUDE_SOURCES": "naver"})
+    assert record["status"] == "unconfigured"
+    assert "naver" not in _available({"INCLUDE_SOURCES": "naver"})
+
+
+def test_doctor_names_a_half_set_pair():
+    record = doctor._naver_record({"NCP_APIGW_API_KEY_ID": "fake-hub-id"})
+    assert record["status"] == "unconfigured"
+    assert record["note"] == "NCP_APIGW_API_KEY_ID is set without NCP_APIGW_API_KEY"
+
+
+def test_doctor_never_prints_a_key_value():
+    config = {**FAKE_HUB_CONFIG, **FAKE_LEGACY_CONFIG, "INCLUDE_SOURCES": "naver"}
+    rendered = repr(doctor._naver_record(config))
+    for value in (*FAKE_HUB_CONFIG.values(), *FAKE_LEGACY_CONFIG.values()):
+        assert value not in rendered
+
+
+def test_doctor_never_live_probes_naver():
+    assert "naver" not in doctor._probeable_sources()

@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, env, http, naver
+from lib import cjk, dedupe, env, http, naver, normalize
 from lib.relevance import token_overlap_relevance
 
 
@@ -525,3 +525,58 @@ def test_near_identical_korean_titles_are_seen_as_duplicates():
     assert dedupe.token_jaccard(original, reprint) > 0.7
     assert dedupe.hybrid_similarity(original, reprint) > 0.7
     assert dedupe.token_jaccard(original, unrelated) == 0.0
+
+
+# --- normalization ---------------------------------------------------------
+
+def _normalized(monkeypatch, blog=None, news=None):
+    _install(monkeypatch, FakeApi(blog={1: blog or []}, news={1: news or []}))
+    raw = naver.parse_naver_response(_search(), query=TOPIC)
+    return normalize.normalize_source_items("naver", raw, FROM_DATE, TO_DATE)
+
+
+def test_normalized_items_keep_text_dates_and_empty_engagement(monkeypatch):
+    blog, news = _normalized(monkeypatch, blog=[_blog(1)], news=[_news(7)])
+
+    assert blog.source == "naver"
+    assert blog.title == "갤럭시 폴드 한 달 사용 후기"
+    assert blog.body == "갤럭시 폴드 한 달 사용 후기\n갤럭시 폴드를 써 본 솔직한 후기 1번째 & 장단점 정리"
+    assert blog.snippet == "갤럭시 폴드를 써 본 솔직한 후기 1번째 & 장단점 정리"
+    assert blog.author == '어느 블로거의 "일상"'
+    assert blog.container == "Naver Blog"
+    assert blog.url == "https://blog.naver.com/someone/1"
+
+    assert news.container == "Naver News"
+    assert news.author == "example-press.co.kr"
+    assert news.metadata["original_url"] == "https://www.example-press.co.kr/news/7"
+
+    for item in (blog, news):
+        assert item.published_at == "2026-10-05"
+        assert item.date_confidence == "high"
+        assert item.engagement == {}
+        assert item.relevance_hint > 0.25
+
+
+def test_an_undated_item_is_low_confidence_not_trusted():
+    raw = [{"id": "naver-blog-x", "title": "갤럭시 폴드 후기", "url": "https://blog.naver.com/someone/9",
+            "text": "본문", "date": None, "metadata": {"kind": "blog"}}]
+    (item,) = normalize.normalize_source_items("naver", raw, FROM_DATE, TO_DATE)
+    assert item.published_at is None
+    assert item.date_confidence == "low"
+
+
+def test_the_normalizer_does_not_pass_out_of_window_items():
+    raw = [
+        {"id": "a", "title": "갤럭시 폴드 후기", "url": "https://blog.naver.com/someone/1", "date": "2026-10-05", "metadata": {"kind": "blog"}},
+        {"id": "b", "title": "갤럭시 폴드 후기", "url": "https://blog.naver.com/someone/2", "date": "2026-08-01", "metadata": {"kind": "blog"}},
+    ]
+    items = normalize.normalize_source_items("naver", raw, FROM_DATE, TO_DATE)
+    assert [item.item_id for item in items] == ["a"]
+
+
+def test_an_item_without_a_known_kind_still_normalizes():
+    raw = [{"title": "", "url": "https://example.com/x", "date": "2026-10-05"}]
+    (item,) = normalize.normalize_source_items("naver", raw, FROM_DATE, TO_DATE)
+    assert item.item_id == "NV1"
+    assert item.title == "Naver result 1"
+    assert item.container == "Naver"

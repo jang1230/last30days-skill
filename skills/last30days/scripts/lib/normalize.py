@@ -59,6 +59,7 @@ def normalize_source_items(
         ),
         "hackernews": _normalize_hackernews,
         "devto": _normalize_devto,
+        "naver": _normalize_naver,
         "stocktwits": _normalize_stocktwits,
         "dripstack": _normalize_dripstack,
         "bluesky": lambda s, i, idx, fd, td: _normalize_microblog(
@@ -599,6 +600,44 @@ def _normalize_devto(
         why_relevant=str(item.get("why_relevant") or ""),
         snippet=description or comment_text,
         metadata={**(item.get("metadata") or {}), "top_comments": top_comments},
+    )
+
+
+_NAVER_CONTAINERS = {"blog": "Naver Blog", "news": "Naver News"}
+
+
+def _normalize_naver(
+    source: str,
+    item: dict[str, Any],
+    index: int,
+    from_date: str,
+    to_date: str,
+) -> schema.SourceItem:
+    """Normalizer for Naver blog and news search results.
+
+    The search API returns no likes or comment counts, so engagement stays
+    empty and ranking relies on relevance and recency. The adapter drops rows
+    without a readable date; one that arrives undated anyway is marked low
+    confidence rather than trusted.
+    """
+    meta = item.get("metadata") or {}
+    title = str(item.get("title") or "").strip()
+    description = str(item.get("text") or "").strip()
+    return _source_item(
+        item_id=str(item.get("id") or f"NV{index + 1}"),
+        source=source,
+        title=title or f"Naver result {index + 1}",
+        body="\n".join(part for part in [title, description] if part),
+        url=str(item.get("url") or ""),
+        author=str(item.get("author") or "") or None,
+        container=_NAVER_CONTAINERS.get(str(meta.get("kind") or ""), "Naver"),
+        published_at=item.get("date"),
+        date_confidence=_date_confidence(item, from_date, to_date, default="low"),
+        engagement={},
+        relevance_hint=item.get("relevance", 0.5),
+        why_relevant=str(item.get("why_relevant") or ""),
+        snippet=description[:400],
+        metadata=dict(meta),
     )
 
 

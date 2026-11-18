@@ -34,6 +34,10 @@ SOURCE_QUALITY = {
     "tiktok": 0.58,
     "jobs": 0.72,
     "corpus": 0.75,
+    # One score for two kinds: news reporting sits with the curated feeds,
+    # blog search carries a lot of sponsored posts, and the source is scored
+    # as a whole.
+    "naver": 0.65,
 }
 
 
@@ -345,9 +349,10 @@ _ENGAGEMENT_LOG_REFERENCE: dict[str, float] = {
 #   stocktwits - the author's follower count dominates sparse likes/reshares
 #   telegram   - the channel's subscriber count dominates per-post views
 #   arxiv, techmeme, dripstack, corpus - no engagement fields at all
+#   naver      - the search API returns no likes or comment counts
 _NO_ENGAGEMENT_SCORE_SOURCES = frozenset({
     "jobs", "meta_ads", "grounding", "perplexity", "stocktwits", "telegram",
-    "arxiv", "techmeme", "dripstack", "corpus",
+    "arxiv", "techmeme", "dripstack", "corpus", "naver",
 })
 
 

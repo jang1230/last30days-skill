@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from lib import cjk, dedupe, env, http, naver, normalize
+from lib import cjk, dedupe, env, http, naver, normalize, signals
 from lib.relevance import token_overlap_relevance
 
 
@@ -580,3 +580,37 @@ def test_an_item_without_a_known_kind_still_normalizes():
     assert item.item_id == "NV1"
     assert item.title == "Naver result 1"
     assert item.container == "Naver"
+
+
+# --- scoring ---------------------------------------------------------------
+
+def test_naver_items_get_no_engagement_score(monkeypatch):
+    items = _normalized(monkeypatch, blog=[_blog(1)], news=[_news(7)])
+    assert "naver" in signals._NO_ENGAGEMENT_SCORE_SOURCES
+    for item in items:
+        assert signals.engagement_raw(item) is None
+        assert signals.engagement_score(item) is None
+
+
+def _ranked(monkeypatch, blog):
+    items = _normalized(monkeypatch, blog=blog)
+    ranked = signals.annotate_stream(items, TOPIC, "balanced_recent", reference_date=TO_DATE)
+    for item in ranked:
+        assert item.engagement_score is None
+        assert item.source_quality == signals.SOURCE_QUALITY["naver"]
+    return ranked
+
+
+def test_with_equal_text_the_newer_naver_item_ranks_first(monkeypatch):
+    ranked = _ranked(monkeypatch, [_blog(2, postdate="20260912"), _blog(1, postdate="20261010")])
+    assert [item.url.rsplit("/", 1)[-1] for item in ranked] == ["1", "2"]
+    assert ranked[0].local_relevance == ranked[1].local_relevance > 0
+    assert ranked[0].freshness > ranked[1].freshness
+
+
+def test_on_the_same_day_the_more_relevant_naver_item_ranks_first(monkeypatch):
+    weaker = {**_blog(2), "title": "<b>후기</b> 모음", "description": "<b>갤럭시</b> 외 여러 제품"}
+    ranked = _ranked(monkeypatch, [weaker, _blog(1)])
+    assert [item.url.rsplit("/", 1)[-1] for item in ranked] == ["1", "2"]
+    assert ranked[0].freshness == ranked[1].freshness
+    assert ranked[0].local_relevance > ranked[1].local_relevance > 0

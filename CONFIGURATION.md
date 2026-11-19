@@ -416,7 +416,7 @@ What to expect:
 
 - **Blogs and news only.** Cafe posts are not searched: the API returns no date for them, so they cannot be placed in the window.
 - **No engagement numbers.** The search API returns no likes or comment counts. Naver items show none and rank on relevance and recency.
-- **Newest results first.** The API has no date-range parameter, so the engine asks for the newest results and keeps the ones inside the window: up to 100/200/300 results per kind at quick/default/deep depth, and up to the API's ceiling of 1,000 when the window ends before today. On a busy topic that reaches back hours or days, not the whole window.
+- **Relevant results plus newest results.** The API has no date-range parameter, so current windows fetch 1/2/3 relevance-sorted pages per kind at quick/default/deep depth, followed by one newest-first page at default/deep depth, and keep rows inside the window. Each page holds up to 100 results; a fetch makes up to 2/6/8 page requests across blogs and news. Windows ending before today still page newest-first only, up to 1,000 results per kind. Planner subqueries are capped at 2 Naver fetches per run by default (`--max-source-fetches` overrides this); fewer than 3 Naver items without an error may trigger one extra simplified-query retry at default/deep depth.
 - **Dates are Korea time.** A blog post carries a day with no time of day, so days are compared as Naver states them, without conversion.
 - **Keys are read from the environment or `.env` only**, not from the Keychain or `pass` sources below.
 - **A 401 from NAVER API HUB** usually means the Search API is not enabled for that Application in the console, or that Naver Developers keys were put in the API HUB variables.

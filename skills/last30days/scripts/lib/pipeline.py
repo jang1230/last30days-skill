@@ -131,9 +131,11 @@ SEARCH_ALIAS = {
 # product search. Extra streams would be pure redundancy at one credit each.
 # meta_ads is capped at 1 for the same reason as amazon: one advertiser page is
 # resolved per run, so every subquery would issue the identical page fetch.
+# naver is capped at 2: each current-window fetch issues up to 8 API requests
+# against a daily quota, so planner subqueries must not multiply that cost.
 MAX_SOURCE_FETCHES: dict[str, int] = {
     "x": 2, "jobs": 1, "linkedin": 1, "stocktwits": 1, "trustpilot": 1, "amazon": 1,
-    "telegram": 1, "meta_ads": 1, "devto": 1,
+    "telegram": 1, "meta_ads": 1, "devto": 1, "naver": 2,
 }
 
 # Sources whose thin result is their normal success state, so the "<3 items"

@@ -14,9 +14,13 @@ pair is set, never by looking at the values. A complete API HUB pair wins.
 The source is off by default: ``INCLUDE_SOURCES=naver`` or ``--search naver``
 turns it on, and only when a complete key pair is configured.
 
-The API has no date-range parameter. Each kind is requested with ``sort=date``
-(newest first) and filtered to the window locally, paging until a page reaches
-past the window start, within ``MAX_PAGES`` and ``PAGING_BUDGET_SECONDS``.
+The API has no date-range parameter. Current windows fetch relevance-sorted
+pages (``sort=sim``), then one newest-first page (``sort=date``) at default/deep
+depth. Historical windows use only newest-first paging, until a page reaches
+past the window start or ``MAX_PAGES``. All rows are filtered locally, with
+``PAGING_BUDGET_SECONDS`` shared by requests after each kind's first.
+Equal relevance scores preserve the API's sim order ahead of date-only rows,
+with a quarter of kept slots reserved for fresh date-only results when available.
 
 Blog rows carry ``postdate`` (``YYYYMMDD``) and news rows carry ``pubDate``
 (RFC 822, ``+0900``). A row whose date is missing or unreadable is dropped
@@ -48,20 +52,24 @@ PROVIDER_LABELS = {PROVIDER_HUB: "NAVER API HUB", PROVIDER_LEGACY: "Naver Develo
 
 KINDS = ("blog", "news")
 # The API's own ceilings: display is 1-100 and start is 1-1000, so a query
-# reaches at most the 1,000 newest results of a kind.
+# reaches at most 1,000 results of a kind in each sort order.
 DISPLAY = 100
 MAX_START = 1000
-# Pages requested per kind when the window ends today. A window that ends
-# before today has to page past everything newer first, so it may use every
-# page the API allows.
-PAGES = {"quick": 1, "default": 2, "deep": 3}
+# Current windows fetch relevant pages first, then fresh results at default/deep.
+SIM_PAGES = {"quick": 1, "default": 2, "deep": 3}
+DATE_PAGES = {"quick": 0, "default": 1, "deep": 1}
+# Historical windows use only date paging, past newer rows to the API ceiling.
 MAX_PAGES = MAX_START // DISPLAY
 # Items kept per kind, so a busy blog query cannot crowd out the news.
 KEEP_PER_KIND = {"quick": 10, "default": 20, "deep": 30}
-# Hits below this token-overlap score are dropped. Same bar as dev.to search:
+# Reserve a quarter of slots for date-only rows matching or beating main's lowest score.
+FRESH_SHARE = 0.25
+# Hits below this blended token-overlap score are dropped. Same bar as dev.to search:
 # date-sorted results match any query term, so the newest page of a
 # multi-word query is mostly noise.
 SEARCH_RELEVANCE_FLOOR = 0.25
+# Title matches outweigh tokens appearing only in the description.
+TITLE_WEIGHT = 0.6
 # Total wall-clock cap per request; the socket timeout alone bounds each read.
 REQUEST_DEADLINE_SECONDS = 20.0
 # Shared by every page after the first, across both kinds.
@@ -76,6 +84,13 @@ class Credentials(NamedTuple):
     provider: str
     client_id: str
     client_secret: str
+
+
+class _Candidate(NamedTuple):
+    score: float
+    day: str
+    sim_position: int | None
+    row: dict[str, Any]
 
 
 def _log(msg: str) -> None:
@@ -220,8 +235,11 @@ def row_date(kind: str, row: dict[str, Any]) -> str | None:
         return None
 
 
-def _row_text(row: dict[str, Any]) -> str:
-    return f"{strip_markup(row.get('title'))} {strip_markup(row.get('description'))}"
+def _relevance(query, title: str, text: str) -> float:
+    """Blend the title's score with the title-plus-description score."""
+    title_score = token_overlap_relevance(query, title)
+    full_score = token_overlap_relevance(query, f"{title} {text}")
+    return TITLE_WEIGHT * title_score + (1 - TITLE_WEIGHT) * full_score
 
 
 def _fetch_kind(
@@ -233,33 +251,41 @@ def _fetch_kind(
     *,
     depth: str,
     deadline: float,
-) -> list[dict[str, Any]]:
-    """Page one kind newest-first until a page reaches past the window start."""
-    max_pages = MAX_PAGES if _is_historical(to_date) else PAGES.get(depth, PAGES["default"])
-    rows: list[dict[str, Any]] = []
-    for page in range(1, max_pages + 1):
-        start = 1 + (page - 1) * DISPLAY
-        if page > 1 and time.monotonic() >= deadline:
-            _log(f"{kind} '{query}': stopped after {page - 1} pages at the time budget; older in-window results may be missing")
-            return rows
-        params = {"query": query, "display": DISPLAY, "start": start, "sort": "date"}
-        try:
-            batch = _get_rows(credentials, kind, params, deadline=deadline if page > 1 else None)
-        except Exception as exc:
-            if page == 1:
-                raise
-            _log(f"{kind} '{query}': page {page} failed ({exc}); keeping the {page - 1} pages fetched")
-            return rows
-        rows.extend(batch)
-        if len(batch) < DISPLAY:
-            return rows
-        dated = [day for day in (row_date(kind, row) for row in batch) if day]
-        if from_date and dated and min(dated) < from_date:
-            # Newest first: once a page holds a row older than the window
-            # start, every later page is older still.
-            return rows
-    if rows and len(rows) >= max_pages * DISPLAY:
-        _log(f"{kind} '{query}': stopped at {max_pages} pages; older in-window results may be missing")
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return (sort, row) pairs in request order; historical windows use date only."""
+    historical = _is_historical(to_date)
+    sorts = [("date", MAX_PAGES)] if historical else [
+        ("sim", SIM_PAGES.get(depth, SIM_PAGES["default"])),
+        ("date", DATE_PAGES.get(depth, DATE_PAGES["default"])),
+    ]
+    rows: list[tuple[str, dict[str, Any]]] = []
+    fetched_pages = 0
+    for sort, max_pages in sorts:
+        for page in range(1, max_pages + 1):
+            start = 1 + (page - 1) * DISPLAY
+            if fetched_pages and time.monotonic() >= deadline:
+                _log(f"{kind} '{query}': stopped after {fetched_pages} pages at the time budget; older in-window results may be missing")
+                return rows
+            params = {"query": query, "display": DISPLAY, "start": start, "sort": sort}
+            try:
+                batch = _get_rows(credentials, kind, params, deadline=deadline if fetched_pages else None)
+            except Exception as exc:
+                if not fetched_pages:
+                    raise
+                _log(f"{kind} '{query}': {sort} page {page} failed ({exc}); keeping the {fetched_pages} pages fetched")
+                return rows
+            fetched_pages += 1
+            rows.extend((sort, row) for row in batch)
+            if len(batch) < DISPLAY:
+                break
+            if sort == "date":
+                dated = [day for day in (row_date(kind, row) for row in batch) if day]
+                if from_date and dated and min(dated) < from_date:
+                    # Newest first: every later page is older still.
+                    break
+        else:
+            if historical:
+                _log(f"{kind} '{query}': stopped at {max_pages} pages; older in-window results may be missing")
     return rows
 
 
@@ -330,8 +356,8 @@ def search_naver(
             _log(f"{kind} search failed for '{query}': {detail}")
             continue
         undated = out_of_window = off_topic = 0
-        relevant: list[tuple[float, str, dict[str, Any]]] = []
-        for row in rows:
+        relevant: list[_Candidate] = []
+        for position, (sort, row) in enumerate(rows):
             url = str(row.get("link") or "").strip()
             if not url or url in seen_urls:
                 continue
@@ -342,15 +368,44 @@ def search_naver(
             if (from_date and day < from_date) or (to_date and day > to_date):
                 out_of_window += 1
                 continue
-            score = token_overlap_relevance(topic or query, _row_text(row))
+            score = _relevance(
+                topic or query, strip_markup(row.get("title")), strip_markup(row.get("description")),
+            )
             if score < SEARCH_RELEVANCE_FLOOR:
                 off_topic += 1
                 continue
             seen_urls.add(url)
-            relevant.append((score, day, {**row, "_naver_kind": kind, "_naver_date": day}))
-        # Most relevant first, newest first among equals.
-        relevant.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-        kept = [row for _score, _day, row in relevant[:keep]]
+            relevant.append(_Candidate(
+                score, day, position if sort == "sim" else None,
+                {**row, "_naver_kind": kind, "_naver_date": day},
+            ))
+        # Sim pages arrive first, so a duplicate date row cannot replace a
+        # sim position. Among equal scores, preserve sim order before recency.
+        relevant.sort(key=lambda entry: (
+            entry.score,
+            entry.sim_position is not None,
+            -entry.sim_position if entry.sim_position is not None else 0,
+            entry.day if entry.sim_position is None else "",
+        ), reverse=True)
+        date_only = [entry for entry in relevant if entry.sim_position is None]
+        if date_only and len(date_only) < len(relevant):
+            fresh_slots = int(keep * FRESH_SHARE)
+            selected = relevant[:keep - fresh_slots]
+            selected_urls = {entry.row["link"] for entry in selected}
+            fresh = sorted(
+                (entry for entry in date_only if entry.row["link"] not in selected_urls
+                 and (not selected or entry.score >= selected[-1].score)),
+                key=lambda entry: (entry.score, entry.day), reverse=True,
+            )[:fresh_slots]
+            selected.extend(fresh)
+            selected_urls.update(entry.row["link"] for entry in fresh)
+            selected.extend([
+                entry for entry in relevant if entry.row["link"] not in selected_urls
+            ][:keep - len(selected)])
+        else:
+            # Quick and historical windows retain their single-sort ordering.
+            selected = relevant[:keep]
+        kept = [entry.row for entry in selected]
         result["items"].extend(kept)
         _log(
             f"{kind} '{query}': kept {len(kept)} of {len(rows)} "
@@ -378,7 +433,7 @@ def parse_naver_response(response: dict[str, Any], query: str = "") -> list[dict
         text = strip_markup(row.get("description"))
         url = str(row.get("link") or "").strip()
         day = row.get("_naver_date") or row_date(kind, row)
-        relevance = token_overlap_relevance(query, f"{title} {text}") if query else 0.5
+        relevance = _relevance(query, title, text) if query else 0.5
         metadata: dict[str, Any] = {"kind": kind}
         if kind == "news":
             original_url = str(row.get("originallink") or "").strip()

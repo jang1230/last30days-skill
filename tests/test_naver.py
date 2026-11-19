@@ -61,7 +61,12 @@ def _news(n, title="삼성 <b>갤럭시</b> <b>폴드</b> 신제품 <b>후기</b
 
 
 class FakeApi:
-    """Stands in for http.request; pages are keyed by (kind, start)."""
+    """Mock http.request with per-kind pages keyed by start.
+
+    Integer keys serve the same rows, in fixture order, for sim and date.
+    A (sort, start) key overrides that sort's page; absent pages are empty.
+    The fail argument applies to both sorts of the named kind.
+    """
 
     def __init__(self, blog=None, news=None, fail=()):
         self.pages = {"blog": blog or {}, "news": news or {}}
@@ -74,10 +79,11 @@ class FakeApi:
         kind = parsed.path.rsplit("/", 1)[-1].removesuffix(".json")
         self.calls.append({"url": url, "kind": kind, "query": query, "headers": dict(headers or {}), "kwargs": kwargs})
         assert method == "GET"
-        assert query["sort"] == "date"
+        assert query["sort"] in {"sim", "date"}
         if kind in self.fail:
             raise self.fail[kind]
-        rows = self.pages[kind].get(int(query["start"]), [])
+        start = int(query["start"])
+        rows = self.pages[kind].get((query["sort"], start), self.pages[kind].get(start, []))
         return {"lastBuildDate": "Sun, 11 Oct 2026 10:00:00 +0900", "total": len(rows), "start": int(query["start"]), "display": len(rows), "items": rows}
 
     def starts(self, kind):
@@ -91,6 +97,300 @@ def _install(monkeypatch, api):
 
 def _search(depth="default", credentials=HUB, to_date=TO_DATE, **kwargs):
     return naver.search_naver(TOPIC, FROM_DATE, to_date, depth=depth, credentials=credentials, **kwargs)
+
+
+class SortedApi:
+    """Mock transport keyed by (kind, sort, start); leaves the old FakeApi intact."""
+
+    def __init__(self, pages=None, failures=()):
+        self.pages = pages or {}
+        self.failures = set(failures)
+        self.calls = []
+
+    def __call__(self, method, url, **kwargs):
+        parsed = urllib.parse.urlparse(url)
+        params = dict(urllib.parse.parse_qsl(parsed.query))
+        kind = parsed.path.rsplit("/", 1)[-1].removesuffix(".json")
+        key = (kind, params["sort"], int(params["start"]))
+        self.calls.append(key)
+        assert method == "GET"
+        assert params["display"] == str(naver.DISPLAY)
+        if key in self.failures:
+            raise OSError("fake page failure")
+        return {"items": self.pages.get(key, [])}
+
+    def sequence(self, kind):
+        return [(sort, start) for called_kind, sort, start in self.calls if called_kind == kind]
+
+
+@pytest.mark.parametrize("kind", naver.KINDS)
+def test_historical_sorted_requests_reach_the_ceiling_without_sim(monkeypatch, kind, capsys):
+    row = _blog if kind == "blog" else _news
+    starts = list(range(1, 1001, 100))
+    api = _install(monkeypatch, SortedApi({
+        (kind, "date", start): [row(start + offset) for offset in range(naver.DISPLAY)]
+        for start in starts
+    }))
+    result = naver.search_naver(TOPIC, "2026-08-01", "2026-08-31", depth="quick", credentials=HUB)
+    assert api.sequence(kind) == [("date", start) for start in starts]
+    assert all(sort == "date" for _, sort, _ in api.calls)
+    assert result["items"] == []
+    assert "stopped at 10 pages; older in-window results may be missing" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stop", ["short", "old"])
+def test_historical_date_paging_retains_early_stops(monkeypatch, stop, capsys):
+    second = [_blog(101)] if stop == "short" else _full_page(101, "20260801")
+    api = _install(monkeypatch, SortedApi({
+        ("blog", "date", 1): _full_page(1, "20261010"),
+        ("blog", "date", 101): second,
+        ("blog", "date", 201): _full_page(201, "20260701"),
+    }))
+    _search(to_date="2026-09-30")
+    assert api.sequence("blog") == [("date", 1), ("date", 101)]
+    assert "stopped at" not in capsys.readouterr().err
+
+
+def test_sim_pages_keep_older_in_window_rows_when_date_page_is_all_new(monkeypatch, capsys):
+    old_rows = _full_page(1, "20260801")
+    old_rows[0] = _blog("window-start", postdate="20260911")
+    new_rows = _full_page(300, "20261011")
+    # Fresh rows still pass the floor, but their titles are weaker matches.
+    for row in new_rows:
+        row["title"] = "휴대폰 사용기"
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): old_rows,
+        ("blog", "sim", 101): [
+            _blog("middle", postdate="20260920"),
+            _blog("future", postdate="20261012"),
+            _blog("undated", postdate=""),
+        ],
+        ("blog", "date", 1): new_rows,
+    }))
+    result = _search()
+    assert [row["link"].rsplit("/", 1)[-1] for row in result["items"][:2]] == ["window-start", "middle"]
+    assert all(FROM_DATE <= row["_naver_date"] <= TO_DATE for row in result["items"])
+    assert any(row["_naver_date"] == TO_DATE for row in result["items"])
+    assert "stopped at" not in capsys.readouterr().err
+
+
+def test_the_same_link_from_both_sorts_is_kept_once(monkeypatch):
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): [_blog(1)],
+        ("blog", "date", 1): [_blog(1), _blog(2)],
+    }))
+    result = _search()
+    assert sorted(row["link"] for row in result["items"]) == [_blog(1)["link"], _blog(2)["link"]]
+
+
+@pytest.mark.parametrize("size", [0, 1, 99])
+def test_short_sim_page_still_requests_the_date_page(monkeypatch, size):
+    api = _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): [_blog(n) for n in range(size)],
+        ("blog", "sim", 101): _full_page(100, "20261005"),
+        ("blog", "date", 1): [_blog("fresh", postdate="20261011")],
+    }))
+    result = _search(depth="deep")
+    assert api.sequence("blog") == [("sim", 1), ("date", 1)]
+    assert _blog("fresh")["link"] in {row["link"] for row in result["items"]}
+
+
+def test_equal_scores_preserve_sim_order_across_pages_before_date_only_rows(monkeypatch):
+    first = _full_page(0, "20260801")
+    first[0] = _blog("sim-first", postdate="20260911")
+    first[1] = _blog("sim-second", postdate="20261005")
+    last = _blog("sim-third", postdate="20260920")
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): first,
+        ("blog", "sim", 101): [last],
+        ("blog", "date", 1): [
+            _blog("date-newest", postdate="20261011"),
+            first[1], first[0], last,
+            _blog("date-older", postdate="20261001"),
+        ],
+    }))
+    result = _search()
+    assert [row["link"].rsplit("/", 1)[-1] for row in result["items"]] == [
+        "sim-first", "sim-second", "sim-third", "date-newest", "date-older",
+    ]
+    parsed = naver.parse_naver_response(result, query=TOPIC)
+    assert len({item["relevance"] for item in parsed}) == 1
+    for item in parsed:
+        assert not any(key.startswith("_") for key in item)
+        assert item["metadata"] == {"kind": "blog", "blog_url": "blog.naver.com/someone"}
+
+
+@pytest.mark.parametrize("depth", ["default", "deep"])
+def test_equal_score_sim_surplus_reserves_newest_date_only_slots(monkeypatch, depth):
+    sim = [_blog(f"sim-{n}", postdate=f"202609{11 + n % 20:02d}") for n in range(60)]
+    # Deliberately reverse recency to verify selection, not transport order.
+    fresh = [_blog(f"fresh-{n}", postdate=f"202610{n + 1:02d}") for n in range(10)]
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): sim,
+        ("blog", "date", 1): [sim[0], *fresh],
+    }))
+    result = _search(depth=depth)
+    keep = naver.KEEP_PER_KIND[depth]
+    fresh_slots = int(keep * naver.FRESH_SHARE)
+    expected = sim[:keep - fresh_slots] + list(reversed(fresh))[:fresh_slots]
+    assert [row["link"] for row in result["items"]] == [row["link"] for row in expected]
+    if depth == "default":
+        assert fresh_slots == 5
+
+
+@pytest.mark.parametrize("sim_count", [17, 30])
+def test_weaker_date_only_rows_use_general_fill_not_reserved_slots(monkeypatch, sim_count):
+    sim = [_blog(f"sim-{n}", postdate="20260920") for n in range(sim_count)]
+    fresh = [
+        _blog(f"fresh-{n}", title="베트남 여행 유심 구매 안내", postdate=f"202610{n + 1:02d}")
+        for n in range(10)
+    ]
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): sim,
+        ("blog", "date", 1): fresh,
+    }))
+    result = _search()
+    expected = (sim + list(reversed(fresh)))[:20]
+    assert [row["link"] for row in result["items"]] == [row["link"] for row in expected]
+    # The weaker rows pass the ordinary floor and remain eligible for fill.
+    strong, weak = naver.parse_naver_response({"items": [sim[0], fresh[0]]}, query=TOPIC)
+    assert strong["relevance"] > weak["relevance"] >= naver.SEARCH_RELEVANCE_FLOOR
+
+
+def test_higher_score_date_only_row_precedes_lower_score_sim_row(monkeypatch):
+    weak = _blog("weak-sim", title="베트남 여행 유심 구매 안내")
+    strong = _blog("strong-date", postdate="20260911")
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): [weak],
+        ("blog", "date", 1): [strong],
+    }))
+    result = _search()
+    assert [row["link"] for row in result["items"]] == [strong["link"], weak["link"]]
+    a, b = naver.parse_naver_response(result, query=TOPIC)
+    assert a["relevance"] > b["relevance"]
+
+
+def test_historical_selection_keeps_score_then_day_order(monkeypatch):
+    older = _blog("older", postdate="20260911")
+    newer = _blog("newer", postdate="20260929")
+    weak = _blog("weak", title="베트남 여행 유심 구매 안내", postdate="20260930")
+    api = _install(monkeypatch, SortedApi({
+        ("blog", "date", 1): [weak, older, newer],
+    }))
+    result = _search(to_date="2026-09-30")
+    assert api.sequence("blog") == [("date", 1)]
+    assert [row["link"] for row in result["items"]] == [newer["link"], older["link"], weak["link"]]
+
+
+def test_quick_selection_keeps_first_sim_rows_in_api_order(monkeypatch):
+    sim = [_blog(n, postdate=f"202609{11 + n % 20:02d}") for n in range(30)]
+    api = _install(monkeypatch, SortedApi({("blog", "sim", 1): sim}))
+    result = _search(depth="quick")
+    assert api.sequence("blog") == [("sim", 1)]
+    assert [row["link"] for row in result["items"]] == [row["link"] for row in sim[:10]]
+
+
+@pytest.mark.parametrize("fresh_count", [0, 2])
+def test_unfilled_fresh_slots_fall_back_to_remaining_sim_rows(monkeypatch, fresh_count):
+    sim = [_blog(f"sim-{n}") for n in range(30)]
+    fresh = [_blog(f"fresh-{n}") for n in range(fresh_count)]
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): sim,
+        ("blog", "date", 1): fresh,
+    }))
+    result = _search()
+    expected = sim[:20] if not fresh else sim[:15] + fresh + sim[15:18]
+    assert [row["link"] for row in result["items"]] == [row["link"] for row in expected]
+
+
+@pytest.mark.parametrize("failed_request", [("sim", 101), ("date", 1)])
+def test_later_sorted_request_failure_keeps_previous_rows(monkeypatch, failed_request, capsys):
+    sort, start = failed_request
+    first = _full_page(1, "20261005") if sort == "sim" else [_blog(1)]
+    _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): first,
+        ("news", "sim", 1): [_news(1)],
+    }, failures=[("blog", sort, start)]))
+    result = _search()
+    assert result["errors"] == []
+    assert {row["_naver_kind"] for row in result["items"]} == {"blog", "news"}
+    assert _blog(1)["link"] in {row["link"] for row in result["items"]}
+    assert f"{sort} page {1 if start == 1 else 2} failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failing, surviving", [("blog", "news"), ("news", "blog")])
+def test_first_sim_failure_fails_only_that_kind(monkeypatch, failing, surviving):
+    api = _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): [_blog(1)],
+        ("news", "sim", 1): [_news(1)],
+    }, failures=[(failing, "sim", 1)]))
+    result = _search()
+    assert api.sequence(failing) == [("sim", 1)]
+    assert [row["_naver_kind"] for row in result["items"]] == [surviving]
+    assert result["errors"] == [f"{failing}: fake page failure"]
+    assert "error" not in result
+
+
+@pytest.mark.parametrize("short_sim", [False, True])
+def test_budget_applies_after_first_request_even_across_sorts(monkeypatch, short_sim):
+    monkeypatch.setattr(naver, "PAGING_BUDGET_SECONDS", 0.0)
+    api = _install(monkeypatch, SortedApi({
+        ("blog", "sim", 1): [_blog(1)] if short_sim else _full_page(1, "20261005"),
+        ("news", "sim", 1): [_news(1)],
+    }))
+    result = _search(depth="deep")
+    assert api.calls == [("blog", "sim", 1), ("news", "sim", 1)]
+    assert result["errors"] == []
+    assert {row["_naver_kind"] for row in result["items"]} == {"blog", "news"}
+
+
+@pytest.mark.parametrize("kind", naver.KINDS)
+def test_title_weighting_ranks_korean_title_matches_above_description_only(monkeypatch, kind):
+    row = _blog if kind == "blog" else _news
+    strong = row("A")
+    weak = row("B", title="베트남 여행 유심 구매 안내")
+    _install(monkeypatch, SortedApi({(kind, "sim", 1): [weak, strong]}))
+    result = _search(depth="quick")
+    assert [entry["link"] for entry in result["items"]] == [strong["link"], weak["link"]]
+    a, b = naver.parse_naver_response(result, query=TOPIC)
+    assert a["relevance"] > b["relevance"] >= naver.SEARCH_RELEVANCE_FLOOR
+    old_score = token_overlap_relevance(TOPIC, f"{b['title']} {b['text']}")
+    assert b["relevance"] == pytest.approx(0.4 * old_score, abs=0.005)
+
+
+def test_pipeline_caps_naver_searches_for_three_subqueries(monkeypatch):
+    # Three distinct results per fetch also exercise the real thin-result gate.
+    search = mock.Mock(return_value={"items": [
+        {**_blog(n, title=title), "description": description,
+         "_naver_kind": "blog", "_naver_date": "2026-10-05"}
+        for n, (title, description) in enumerate([
+            ("갤럭시 폴드 후기: 여행 중 배터리와 충전 속도 측정", "화면 밝기를 높이고 동영상을 재생하며 전력 소모를 측정했습니다."),
+            ("갤럭시 폴드 후기: 야간 카메라 사진의 노이즈 분석", "어두운 골목에서 촬영한 사진은 색감이 자연스럽고 초점도 정확했습니다."),
+            ("갤럭시 폴드 후기: 펼친 화면으로 문서 편집하기", "분할 창에서 표와 문서를 함께 보면서 업무를 처리하니 편리했습니다."),
+        ])
+    ], "errors": [], "provider": "hub"})
+    monkeypatch.setattr(naver, "search_naver", search)
+    report = pipeline.run(
+        topic=TOPIC, config=dict(FAKE_HUB_CONFIG), depth="default",
+        requested_sources=["naver"], web_backend="none", as_of_date=TO_DATE,
+        external_plan={
+            "intent": "opinion", "freshness_mode": "balanced_recent", "cluster_mode": "none",
+            "subqueries": [
+                {"label": label, "search_query": f"갤럭시 폴드 {label}",
+                 "ranking_query": TOPIC, "sources": ["naver"]}
+                for label in ["후기", "배터리", "카메라"]
+            ],
+        },
+    )
+    assert len(report.query_plan.subqueries) == 3
+    assert all(subquery.sources == ["naver"] for subquery in report.query_plan.subqueries)
+    assert search.call_count == 2
+
+
+@pytest.mark.parametrize("override, expected", [(None, 2), (0, 0), (1, 1), (4, 4)])
+def test_naver_fetch_cap_uses_the_existing_generic_override(override, expected):
+    config = {} if override is None else {"_max_source_fetches": override}
+    assert pipeline._source_fetch_cap("naver", config) == expected
 
 
 # --- credentials ----------------------------------------------------------
@@ -200,14 +500,17 @@ def test_api_hub_requests_use_the_hub_host_and_headers(monkeypatch):
     assert result["provider"] == "hub"
     assert [call["url"].split("?")[0] for call in api.calls] == [
         "https://naverapihub.apigw.ntruss.com/search/v1/blog",
+        "https://naverapihub.apigw.ntruss.com/search/v1/blog",
+        "https://naverapihub.apigw.ntruss.com/search/v1/news",
         "https://naverapihub.apigw.ntruss.com/search/v1/news",
     ]
-    for call in api.calls:
+    # Each short sim page is followed by the date page for that kind.
+    for call, sort in zip(api.calls, ("sim", "date", "sim", "date")):
         assert call["headers"] == {
             "X-NCP-APIGW-API-KEY-ID": "fake-hub-id",
             "X-NCP-APIGW-API-KEY": "fake-hub-secret",
         }
-        assert call["query"] == {"query": TOPIC, "display": "100", "start": "1", "sort": "date"}
+        assert call["query"] == {"query": TOPIC, "display": "100", "start": "1", "sort": sort}
         assert "fake-hub" not in call["url"]
 
 
@@ -217,6 +520,8 @@ def test_developers_requests_use_the_openapi_host_and_headers(monkeypatch):
     assert result["provider"] == "legacy"
     assert [call["url"].split("?")[0] for call in api.calls] == [
         "https://openapi.naver.com/v1/search/blog.json",
+        "https://openapi.naver.com/v1/search/blog.json",
+        "https://openapi.naver.com/v1/search/news.json",
         "https://openapi.naver.com/v1/search/news.json",
     ]
     for call in api.calls:
@@ -363,27 +668,34 @@ def test_paging_stops_once_a_page_reaches_past_the_window_start(monkeypatch):
         101: _full_page(100, "20260901"),   # older than the window start
         201: _full_page(200, "20260801"),
     }))
-    _search(depth="deep")
+    # Historical windows still page by date and stop at the lower bound.
+    _search(depth="deep", to_date="2026-09-30")
     assert api.starts("blog") == [1, 101]
 
 
 def test_a_short_page_ends_paging(monkeypatch):
     api = _install(monkeypatch, FakeApi(blog={1: [_blog(1)], 101: _full_page(100, "20261001")}))
-    _search(depth="deep")
+    # A short date page ends historical paging entirely.
+    _search(depth="deep", to_date="2026-10-10")
     assert api.starts("blog") == [1]
 
 
-@pytest.mark.parametrize("depth, starts", [
-    ("quick", [1]),
-    ("default", [1, 101]),
-    ("deep", [1, 101, 201]),
-    ("unknown-depth", [1, 101]),
+@pytest.mark.parametrize("kind", naver.KINDS)
+@pytest.mark.parametrize("depth, sequence", [
+    ("quick", [("sim", 1)]),
+    ("default", [("sim", 1), ("sim", 101), ("date", 1)]),
+    ("deep", [("sim", 1), ("sim", 101), ("sim", 201), ("date", 1)]),
+    ("unknown-depth", [("sim", 1), ("sim", 101), ("date", 1)]),
 ])
-def test_a_current_window_pages_by_depth(monkeypatch, depth, starts):
-    pages = {start: _full_page(start, "20261010") for start in range(1, 1001, 100)}
-    api = _install(monkeypatch, FakeApi(blog=pages))
+def test_a_current_window_pages_by_depth(monkeypatch, depth, sequence, kind):
+    row = _blog if kind == "blog" else _news
+    pages = {
+        (kind, sort, start): [row(start + offset) for offset in range(naver.DISPLAY)]
+        for sort, start in sequence
+    }
+    api = _install(monkeypatch, SortedApi(pages))
     _search(depth=depth)
-    assert api.starts("blog") == starts
+    assert api.sequence(kind) == sequence
 
 
 def test_a_past_window_pages_to_the_api_ceiling(monkeypatch):
@@ -415,8 +727,9 @@ def test_a_later_page_failure_keeps_the_pages_already_fetched(monkeypatch):
                 raise OSError("page two down")
             return super().__call__(method, url, headers=headers, **kwargs)
 
-    _install(monkeypatch, FailsOnPageTwo(blog={1: _full_page(0, "20261010")}))
+    api = _install(monkeypatch, FailsOnPageTwo(blog={1: _full_page(0, "20261010")}))
     result = _search()
+    assert api.starts("blog") == [1, 101]
     assert result["errors"] == []
     assert len(result["items"]) == naver.KEEP_PER_KIND["default"]
 
@@ -435,7 +748,12 @@ def test_identical_requests_are_fetched_once(monkeypatch):
     api = _install(monkeypatch, FakeApi(blog={1: [_blog(1)]}, news={1: [_news(1)]}))
     first = _search()
     second = _search()
-    assert len(api.calls) == 2
+    # Both sorts of each kind are fetched once, then reused by the second search.
+    assert len(api.calls) == 4
+    assert [(call["kind"], call["query"]["sort"], call["query"]["start"]) for call in api.calls] == [
+        ("blog", "sim", "1"), ("blog", "date", "1"),
+        ("news", "sim", "1"), ("news", "date", "1"),
+    ]
     assert first["items"] == second["items"]
 
 

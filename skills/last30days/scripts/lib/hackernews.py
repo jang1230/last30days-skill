@@ -484,3 +484,29 @@ def enrich_top_stories(
                 items[idx]["comment_insights"] = []
 
     return items
+
+
+SHOW_HN_OVERFETCH = 100
+
+
+def fetch_show_hn(from_date, to_date, *, min_points=50, limit=30) -> Dict[str, Any]:
+    """Overfetch one Show HN page and apply the points threshold locally."""
+    from urllib.parse import urlencode
+
+    try:
+        from_ts = _date_to_unix(from_date)
+        to_ts = _date_to_unix(to_date) + 86400
+        params = {
+            "tags": "show_hn",
+            "numericFilters": f"created_at_i>{from_ts},created_at_i<{to_ts}",
+            "hitsPerPage": SHOW_HN_OVERFETCH,
+        }
+        response = http.request("GET", f"{ALGOLIA_SEARCH_URL}?{urlencode(params)}",
+                                headers={"User-Agent": http.USER_AGENT}, timeout=30)
+        items = parse_hackernews_response(response, query="")
+        # Like search_hackernews, avoid the historically unsupported points filter.
+        items = [item for item in items if item["engagement"]["points"] >= min_points]
+        items.sort(key=lambda item: item["engagement"]["points"], reverse=True)
+        return {"items": items[:max(0, limit)], "errors": []}
+    except Exception as exc:
+        return {"items": [], "errors": [str(exc)]}

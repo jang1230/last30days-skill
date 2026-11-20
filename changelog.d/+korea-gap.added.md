@@ -1,0 +1,1 @@
+Add a standalone Korea gap check that collects Product Hunt, Show HN, and GeekNews candidates, then checks only host-selected names against Naver blogs and news within a request budget. It saves a Korean report grouping overseas products by observed Korean coverage, without changing existing research or discovery paths.

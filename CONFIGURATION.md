@@ -423,6 +423,61 @@ What to expect:
 
 `doctor` shows the source as `unconfigured` (no complete pair), `opt-in` (keys set, not asked for) or ready.
 
+### Standalone Korea gap check
+
+This fork's separate Korea gap tool collects Product Hunt launches, Show HN
+stories (50+ points by default), and the GeekNews feed. Collection never calls
+Naver. The host model reads the candidates bundle, chooses products and search
+spellings, and writes a picks file; this selection step makes no engine call.
+Existing `/last30days` and `--discover` paths are unchanged.
+
+Direct CLI / dev usage, from the repository root:
+
+```bash
+python3 skills/last30days/scripts/korea_gap.py collect --days 7 --save-dir ./korea-gap
+# Read korea-gap/korea-gap-candidates.json, then write picks.json before checking.
+python3 skills/last30days/scripts/korea_gap.py check --picks ./picks.json --save-dir ./korea-gap --naver-budget 40
+```
+
+Picks must reference the current bundle's `bundle_id` and overseas candidate ids:
+
+```json
+{"bundle_id":"<bundle_id from korea-gap-candidates.json>","picks":[{"id":"ph:1319464","queries":["Tabstack","탭스택"],"context":[],"note":"optional free text"}]}
+```
+
+Each pick has 1–3 non-empty search spellings; duplicate spellings collapse.
+For common names, optionally add `"context": ["브라우저", "browser"]`: a post
+must mention both the name and at least one context word in its title or
+description. Context accepts up to 3 non-empty strings; whitespace and duplicate
+words are normalized. Omitting it or using an empty list disables this filter.
+The report shows the context words and how many name-only rows were excluded.
+Checking requires either complete Naver key pair documented above, without
+`INCLUDE_SOURCES=naver`. Each query costs 2 Naver requests (one relevance-sorted
+page of up to 100 blogs and one of up to 100 news articles); the default budget
+is 40 per run. A failed request is not retried, so the budget caps the real
+number of requests sent to Naver. Cached lookups still reserve budget slots,
+so the reported usage is a conservative upper bound. When the next pick does
+not fit, it and every later pick remain unchecked; partial failures are marked,
+and complete failures produce `unknown` rather than zero coverage.
+
+Counts are distinct returned URLs whose title or description contains the name,
+not Naver's estimated total or an exhaustive search. Verdicts use only matching
+posts dated within the last 30 days: **none** = 0, **rare** = 1–4, **some** = 5–19,
+**arrived** = 20+. Blog/news subtotals also count recent matches only. Other
+matching posts are reported separately as older (including dateless posts);
+5 or more flag a name already in use, possibly for a different brand or meaning.
+Up to 3 dated samples show recent matches first, newest first, then older
+matches, with dateless samples last. English boundaries exclude matches inside
+words; Korean particles are allowed. The same rule applies to context words.
+Context filtering happens locally and does not change the request cost.
+
+`--save-dir` overrides configured `LAST30DAYS_MEMORY_DIR`; one must be provided.
+Collection replaces `korea-gap-candidates.json`. Checking saves
+`korea-gap-YYYY-MM-DD.md`, adding `-2`, `-3`, etc. to preserve earlier reports.
+`collect --emit json` prints the bundle; `check --emit json` prints check results
+while still saving the Markdown report. `collect --min-points` adjusts the Show
+HN threshold. These standalone options do not change the skill's runtime spec.
+
 ### Encrypted credential sources (Keychain / pass)
 
 If you'd rather not keep keys in a plaintext `.env`, the loader has two

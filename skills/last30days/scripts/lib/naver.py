@@ -181,6 +181,7 @@ def clear_cache() -> None:
 
 def _get_rows(
     credentials: Credentials, kind: str, params: dict[str, Any], deadline: float | None = None,
+    *, retries: int = 2,
 ) -> list[dict[str, Any]]:
     url = f"{_endpoint(credentials, kind)}?{urllib.parse.urlencode(params)}"
     key = (credentials.provider, url)
@@ -189,7 +190,7 @@ def _get_rows(
     with lock:
         if key not in _RESPONSE_CACHE:
             data = http.request(
-                "GET", url, headers=_headers(credentials), timeout=15, retries=2,
+                "GET", url, headers=_headers(credentials), timeout=15, retries=retries,
                 deadline_monotonic=min(
                     time.monotonic() + REQUEST_DEADLINE_SECONDS,
                     deadline if deadline is not None else float("inf"),
@@ -459,3 +460,55 @@ def parse_naver_response(response: dict[str, Any], query: str = "") -> list[dict
             "metadata": metadata,
         })
     return items
+
+
+def count_mentions(name, from_date, to_date, *, credentials, context=()) -> dict:
+    """Count literal name mentions in one relevance page per kind, without retries.
+
+    Requests counts attempted kind lookups (cached lookups also reserve a slot),
+    so it is a conservative upper bound on requests sent to Naver.
+    """
+    from .atom_read import mentions
+
+    result = {"name": name, "matches": [], "fetched": {kind: 0 for kind in KINDS},
+              "requests": 0, "errors": [], "skipped_no_context": 0}
+    if credentials is None:
+        result["errors"] = search_naver(name, credentials=None)["errors"]
+        return result
+    query = " ".join((name or "").replace('"', " ").split())
+    if not query:
+        return result
+    http.add_fixture_redactions(credentials[1:])
+    for kind in KINDS:
+        result["requests"] += 1
+        try:
+            rows = _get_rows(credentials, kind, {
+                "query": query, "display": DISPLAY, "start": 1, "sort": "sim",
+            }, retries=1)
+        except Exception as exc:
+            detail = _failure_detail(credentials, exc)
+            # Exception messages may echo headers; never propagate credential values.
+            for secret in credentials[1:]:
+                if secret:
+                    detail = detail.replace(secret, "[redacted]")
+            result["errors"].append(f"{kind}: {detail}")
+            continue
+        result["fetched"][kind] = len(rows)
+        for row in rows:
+            if not (mentions(query, row.get("title")) or mentions(query, row.get("description"))):
+                continue
+            if context and not any(
+                mentions(word, row.get("title")) or mentions(word, row.get("description"))
+                for word in context
+            ):
+                result["skipped_no_context"] += 1
+                continue
+            link = str(row.get("link") or "").strip()
+            if not link:
+                continue
+            day = row_date(kind, row)
+            result["matches"].append({
+                "kind": kind, "title": strip_markup(row.get("title")), "link": link,
+                "date": day, "recent": bool(day and from_date <= day <= to_date),
+            })
+    return result

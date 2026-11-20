@@ -1202,3 +1202,129 @@ def test_doctor_never_prints_a_key_value():
 
 def test_doctor_never_live_probes_naver():
     assert "naver" not in doctor._probeable_sources()
+
+
+@pytest.mark.parametrize("name,text,expected", [
+    ("Arc", "search", False), ("Arc", "Arcade", False), ("Arc", "xArc", False),
+    ("Arc", "Arc2", False), ("Arc", "(aRC)", True), ("Arc", "Arc가", True),
+    ("커서", "커서를 써요", True), ("Cursor", "CURSOR가", True),
+    ("Foo Bar", "<b>fOo</b>  \n BAR!", True), ("C++", "C++용", True),
+])
+def test_count_mentions_boundaries(name, text, expected):
+    rows = [_blog(1, title=text)]
+    with mock.patch.object(naver, "_get_rows", side_effect=[rows, []]) as get:
+        result = naver.count_mentions(name, FROM_DATE, TO_DATE, credentials=HUB)
+    assert len(result["matches"]) == int(expected)
+    assert get.call_count == 2
+    assert result["requests"] == 2
+    assert result["skipped_no_context"] == 0
+
+    # Context uses exactly the same name boundaries, including Korean particles.
+    with mock.patch.object(naver, "_get_rows", side_effect=[[_blog(2, "Product " + text)], []]) as get:
+        result = naver.count_mentions("Product", FROM_DATE, TO_DATE, credentials=HUB, context=[name])
+    assert len(result["matches"]) == int(expected)
+    assert result["skipped_no_context"] == int(not expected)
+    assert get.call_count == result["requests"] == 2
+
+
+def test_count_mentions_window_order_query_and_request_count():
+    rows = [
+        _blog(1, "Cursor가", postdate="20260911"),
+        _blog(2, "Cursor", postdate="20261011"),
+        _blog(3, "Cursor", postdate="20260910"),
+        _blog(4, "Cursor", postdate="20261012"),
+        _blog(5, "Cursor", postdate=""),
+        {**_blog(6, "Other title"), "description": "<b>cursor</b> 도구"},
+    ]
+    with mock.patch.object(naver, "_get_rows", side_effect=[rows, [_news(1, "Cursor")]]) as get:
+        result = naver.count_mentions(' "Cursor" ', FROM_DATE, TO_DATE, credentials=HUB)
+    assert get.call_args_list == [mock.call(HUB, kind, {
+        "query": "Cursor", "display": naver.DISPLAY, "start": 1, "sort": "sim",
+    }, retries=1) for kind in naver.KINDS]
+    assert result["name"] == ' "Cursor" '
+    assert result["fetched"] == {"blog": 6, "news": 1}
+    assert [item["recent"] for item in result["matches"]] == [True, True, False, False, False, True, True]
+    assert [item["link"] for item in result["matches"][:6]] == [row["link"] for row in rows]
+    assert result["matches"][4]["date"] is None
+    assert result["skipped_no_context"] == 0
+
+    blog_rows = [
+        _blog(1, "Coral <b>AI</b> tool"),
+        _blog(2, "Coral Braille"),
+        {**_blog(3, "Coral"), "description": "새로운 브라우저를 써요"},
+        {**_blog(4, "Coral"), "description": "A <b>BROWSER</b> tool"},
+        _blog(5, "Coral historical meaning"),
+        _blog(6, "AI tool without the name"),
+    ]
+    news_rows = [_news(7, "Coral browser"), _news(8, "Coral Braille")]
+    with mock.patch.object(naver, "_get_rows", side_effect=[blog_rows, news_rows]) as get:
+        result = naver.count_mentions("Coral", FROM_DATE, TO_DATE, credentials=HUB,
+                                      context=["AI", "브라우저", "browser"])
+    assert [item["link"] for item in result["matches"]] == [
+        blog_rows[i]["link"] for i in (0, 2, 3)
+    ] + [news_rows[0]["link"]]
+    assert result["skipped_no_context"] == 3
+    assert result["fetched"] == {"blog": 6, "news": 2}
+    assert result["requests"] == get.call_count == 2
+    assert get.call_args_list == [mock.call(HUB, kind, {
+        "query": "Coral", "display": naver.DISPLAY, "start": 1, "sort": "sim",
+    }, retries=1) for kind in naver.KINDS]
+
+
+def test_count_mentions_partial_and_redacted_failure():
+    with mock.patch.object(naver, "_get_rows", side_effect=[
+        OSError("failed fake-hub-id fake-hub-secret"), [_news(1, "Cursor")],
+    ]) as get:
+        result = naver.count_mentions("Cursor", FROM_DATE, TO_DATE, credentials=HUB)
+    assert get.call_count == result["requests"] == 2
+    assert result["fetched"] == {"blog": 0, "news": 1}
+    assert len(result["matches"]) == len(result["errors"]) == 1
+    assert result["errors"][0].startswith("blog:")
+    assert "fake-hub" not in result["errors"][0]
+
+
+def test_count_mentions_no_credentials():
+    with mock.patch.object(naver, "_get_rows") as get:
+        result = naver.count_mentions("Cursor", FROM_DATE, TO_DATE, credentials=None)
+    get.assert_not_called()
+    assert result["requests"] == 0
+    assert result["errors"] == naver.search_naver("Cursor", credentials=None)["errors"]
+
+
+def test_count_mentions_single_attempt_and_search_default_retries():
+    with mock.patch.object(http, "request", return_value={"items": []}) as request:
+        naver.count_mentions("Cursor", FROM_DATE, TO_DATE, credentials=HUB, context=["AI"])
+    assert request.call_count == 2
+    assert all(call.kwargs["retries"] == 1 for call in request.call_args_list)
+    naver.clear_cache()
+    with mock.patch.object(http, "request", return_value={"items": []}) as request:
+        naver.search_naver("Cursor", FROM_DATE, TO_DATE, credentials=HUB, depth="quick")
+    assert request.call_count == 2
+    assert all(call.kwargs["retries"] == 2 for call in request.call_args_list)
+
+
+def test_count_mentions_failed_http_kind_is_not_retried():
+    # Exercise the real http.request retry loop with a mocked owned transport.
+    import urllib.error
+    from lib import bounded_get
+
+    calls = []
+
+    def transport(req, **kwargs):
+        calls.append(req)
+        assert req.get_header("User-agent") == http.USER_AGENT
+        if urllib.parse.urlsplit(req.full_url).path.endswith("/blog"):
+            return 503, b"unavailable", urllib.error.HTTPError(req.full_url, 503, "Unavailable", {}, None)
+        return 200, b'{"items": []}', None
+
+    with mock.patch.object(bounded_get, "get", side_effect=transport):
+        result = naver.count_mentions("Cursor", FROM_DATE, TO_DATE, credentials=HUB)
+    assert len(calls) == result["requests"] == 2
+    assert len(result["errors"]) == 1 and "503" in result["errors"][0]
+
+
+@pytest.mark.parametrize("text", ["Arcß", "KArc", "Arcé", "éArc"])
+def test_count_mentions_boundaries_only_reject_ascii_neighbours(text):
+    with mock.patch.object(naver, "_get_rows", side_effect=[[_blog(1, text)], []]):
+        result = naver.count_mentions("Arc", FROM_DATE, TO_DATE, credentials=HUB)
+    assert len(result["matches"]) == 1

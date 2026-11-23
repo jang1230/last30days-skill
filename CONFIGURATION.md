@@ -928,9 +928,9 @@ Add `--debug` to any run to emit verbose `[DEBUG]` log lines to stderr from the 
 
 ---
 
-## Standalone text trend sweep
+## Standalone trend sweep
 
-This fork's separate, manually invoked tool collects broad text listings for a
+This fork's separate, manually invoked tool collects broad text listings and optional YouTube API results for a
 human or assistant to interpret. It is not connected to `/last30days`.
 
 ```bash
@@ -953,7 +953,7 @@ GitHub return their available listing, whose full parsed contents are retained.
 Files are owner-only and never overwrite an existing name:
 
 - `trend-sweep-YYYY-MM-DD.json`: collection timestamp, source counts, errors and
-  normalized items (source, group, title, summary up to 200 characters, URL,
+  normalized text items only (source, group, title, summary up to 200 characters, URL,
   date, metric, extra metadata, and a `new` boolean).
 - `trend-sweep-YYYY-MM-DD-overseas.md`, `-korea.md`, `-video.md`: separate reading
   summaries with source URLs and instructions for interpreting external material.
@@ -961,11 +961,13 @@ Files are owner-only and never overwrite an existing name:
   group files, then `-3`, etc. Dates use the collection timestamp in UTC.
 
 Summary filenames reserve a run's suffix. JSON is written privately under a
-temporary name and published last, complete, with an exclusive hard link (or
+temporary name and published complete with an exclusive hard link (or
 Windows' no-overwrite rename when links are unavailable). On other filesystems
 without hard-link support, saving fails cleanly rather than risking an overwrite.
 Failed or interrupted saves clean their temporary files and summary reservations
-when Python can run its cleanup. Previous-bundle selection ignores temporary names
+when Python can run its cleanup, including a newly published YouTube sidecar if
+the main JSON publication fails. The main text JSON is published last.
+Previous-bundle selection ignores temporary names
 and legacy zero-byte JSON files; non-empty invalid bundles still cause an error.
 Existing files, including zero-byte leftovers, retain their names and contents.
 
@@ -988,13 +990,14 @@ reported instead of silently treating the run as a first collection.
 
 The screen shows source counts, failures and saved paths. Individual failures
 (including Apple's intermittent 502/504 responses and timeouts) do not stop other
-sources; all-source failure exits 1 and still saves the errors. Successful or
+sources; failure of every text source exits 1 and still saves the errors.
+YouTube failures alone never change the exit code. Successful or
 partially successful collection exits 0; configuration/save errors exit 2.
 Each source uses one fetch attempt through `lib/http.py` with `http.USER_AGENT`
 and a 5 MiB response limit. HTTPS redirects are followed through the shared opener;
 redirects to HTTP or other schemes are refused. Failed fetches are never retried.
-XML containing DOCTYPE or ENTITY declarations is rejected. No credentials, Naver calls, YouTube collection,
-scheduling, or automatic trend interpretation are involved.
+XML containing DOCTYPE or ENTITY declarations is rejected. Text sources need no
+credentials. There are no Naver calls, scheduling, or automatic trend interpretation.
 
 ### Text sweep sources
 
@@ -1242,3 +1245,67 @@ This is the right home for client-specific changes you don't intend to upstream 
 - The skill contract (voice, LAWs, pre-flight protocol): [`skills/last30days/SKILL.md`](skills/last30days/SKILL.md)
 - Shared package vocabulary and engine/harness terminology: [`CONCEPTS.md`](CONCEPTS.md)
 - Contributor guidance: [`CONTRIBUTORS.md`](CONTRIBUTORS.md)
+
+
+### Optional YouTube collection
+
+Enable **YouTube Data API v3** in your Google Cloud project, create an API key
+restricted to that API, and set `YOUTUBE_API_KEY` in your shell environment or
+`~/.config/last30days/.env` (or the existing trusted project `.env` layer).
+The process environment wins over project config, which wins over user config.
+The sweep reads these files directly without opening Keychain or pass; this key
+is not registered with those stores. `GOOGLE_API_KEY` and `YOUTUBE_BACKEND` belong
+to other engine paths and are not used here. The key travels only in the
+`x-goog-api-key` header and is scrubbed from errors and saved API content.
+Credential-bearing redirects must stay on the same HTTPS origin.
+
+```bash
+python3 skills/last30days/scripts/trend_sweep.py collect --save-dir ./trend-sweeps --youtube-searches 15
+python3 skills/last30days/scripts/trend_sweep.py collect --save-dir ./trend-sweeps --youtube-topics "AI,자동화,밈"
+python3 skills/last30days/scripts/trend_sweep.py collect --save-dir ./trend-sweeps --no-youtube
+```
+
+`sources` includes `youtube_chart_kr` and `youtube_search_kr` alongside the 40 text
+sources. The chart requests up to 50 Korean-region mostPopular entries. Search
+requests up to 50 videos published in the past seven days per topic, followed by
+one video-details request for those IDs. Default topics, in order: AI, 인공지능,
+챗GPT, AI 에이전트, 자동화, 창업, 부업, 쇼츠, 밈, 챌린지, 신상, 리뷰.
+Search results keep only videos with Hangul in the title or channel name and
+sort by API view count. The chart retains all entries and records `has_hangul`.
+`short` means a parsed duration of 60 seconds or less, not an official Shorts
+classification. Missing statistics and unparseable durations remain unknown.
+Only API statistics are saved; no growth rates or derived engagement metrics
+are computed, and prior view counts are never compared.
+
+`--youtube-searches` caps attempted search calls (default 15; 0 collects only the
+chart). Search calls and video-list units are reported separately: the default
+12 non-empty topic searches use 12 search calls and 13 video-list units. Failed
+attempts count against the local budget and are never retried. Any HTTP 400, 401,
+or 403 stops all remaining YouTube requests, including authentication, permission,
+and quota failures. The CLI and video summary report that requests stopped early;
+`stopped` records this in the YouTube JSON, while `quota_stopped` is true only for
+a quota/limit 403. Other failures (timeouts, 5xx, malformed JSON) leave later topics
+eligible for collection. Topics beyond the cap, skipped after an early stop,
+or failed during collection are listed as **Unchecked topics** in the
+CLI, YouTube JSON, and video summary. No key or `--no-youtube` skips only YouTube
+and records a notice in the CLI and video summary; Know Your Meme still runs.
+`--no-youtube` does not resolve the key.
+
+YouTube data goes only into `trend-sweep-YYYY-MM-DD[-N]-youtube.json`, with the
+same stem/number as its text bundle, private permissions, exclusive complete
+publication, quota counters, errors, and a top-level `delete_by` date (collection
+date plus 30 days). A skipped YouTube run creates no sidecar. The video summary
+lists Know Your Meme first, then the chart, then a section for each attempted
+topic, showing views, channel and the `short` tag. `--per-source` limits each
+summary section only; the sidecar retains all collected entries. YouTube NEW
+markers compare video URLs only against the most recently saved YouTube sidecar,
+including an earlier run on the same day. A text-only run does not replace that
+comparison. Without a previous sidecar there are no NEW marks.
+
+Every `collect`, including a disabled or keyless run, deletes files named
+`trend-sweep-YYYY-MM-DD[-N]-youtube.json` and `-video.md` when their filename date
+is **more than 30 days before today's UTC date**, and prints each deleted path.
+Modification times do not affect deletion. Text JSON, overseas/korea summaries,
+and unrelated files are retained. Cleanup runs only when `collect` runs; no
+background cleanup is installed. If you stop running it, remove expired YouTube
+artifacts yourself rather than keeping them past the retention period.

@@ -725,6 +725,8 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
         ('NCP_APIGW_API_KEY', None),
         ('NAVER_CLIENT_ID', None),
         ('NAVER_CLIENT_SECRET', None),
+        # Standalone trend sweep only; no extra Keychain/pass lookup.
+        ('YOUTUBE_API_KEY', None),
         # Amazon marketplace the amazon source searches. Non-US users point
         # this at their own storefront (e.g. https://www.amazon.co.uk).
         ('LAST30DAYS_AMAZON_DOMAIN', 'https://www.amazon.com'),

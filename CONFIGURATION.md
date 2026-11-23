@@ -904,6 +904,109 @@ Add `--debug` to any run to emit verbose `[DEBUG]` log lines to stderr from the 
 
 ---
 
+## Standalone text trend sweep
+
+This fork's separate, manually invoked tool collects broad text listings for a
+human or assistant to interpret. It is not connected to `/last30days`.
+
+```bash
+# Direct CLI for this standalone tool:
+python3 skills/last30days/scripts/trend_sweep.py sources
+python3 skills/last30days/scripts/trend_sweep.py collect --save-dir ./trend-sweeps
+python3 skills/last30days/scripts/trend_sweep.py collect --save-dir ./trend-sweeps --per-source 15
+```
+
+`sources` lists IDs, groups, formats, requested counts and resolved URLs without
+network access or configuration reads. `collect` requires `--save-dir` or
+`LAST30DAYS_MEMORY_DIR` (shell environment or the existing `.env` configuration
+layers); the flag takes precedence. Missing or empty save locations exit with
+code 2. `--per-source` defaults to 30 and limits only the Markdown summaries;
+0 produces source counts and guidance without item lines. JSON retains every
+parsed result after URL deduplication, except Wikipedia's explicit top-50 selection.
+For APIs that accept a count, the source table controls that count; feeds and
+GitHub return their available listing, whose full parsed contents are retained.
+
+Files are owner-only and never overwrite an existing name:
+
+- `trend-sweep-YYYY-MM-DD.json`: collection timestamp, source counts, errors and
+  normalized items (source, group, title, summary up to 200 characters, URL,
+  date, metric, extra metadata, and a `new` boolean).
+- `trend-sweep-YYYY-MM-DD-overseas.md`, `-korea.md`, `-video.md`: separate reading
+  summaries with source URLs and instructions for interpreting external material.
+- Repeat runs use `trend-sweep-YYYY-MM-DD-2.json`, `-2-overseas.md`, and corresponding
+  group files, then `-3`, etc. Dates use the collection timestamp in UTC.
+
+Summary filenames reserve a run's suffix. JSON is written privately under a
+temporary name and published last, complete, with an exclusive hard link (or
+Windows' no-overwrite rename when links are unavailable). On other filesystems
+without hard-link support, saving fails cleanly rather than risking an overwrite.
+Failed or interrupted saves clean their temporary files and summary reservations
+when Python can run its cleanup. Previous-bundle selection ignores temporary names
+and legacy zero-byte JSON files; non-empty invalid bundles still cause an error.
+Existing files, including zero-byte leftovers, retain their names and contents.
+
+Deduplication checks all previously kept URL/title pairs and non-empty URLs in
+source-table order. An identical pair is always a duplicate, even across sources.
+An item also duplicates an already-kept URL unless its URL is empty or appears
+more than once within its source's response. This preserves distinct Google
+Trends terms that share a feed URL while removing ordinary cross-source URL
+duplicates. UTM parameters are removed from item URLs before comparison and saving.
+`NEW` compares against only the most recently saved text bundle in the same
+directory, including an earlier run that day. It checks all previous pairs and
+non-empty URLs regardless of source. An identical pair is always known; a URL
+alone is enough unless it is empty or shared within the current item's source
+in either bundle. Thus changing sources or URL multiplicity does not mark an
+unchanged item NEW, while distinct shared-URL terms still compare by title.
+The first run has no NEW markers. Missing items from a failed source can therefore
+appear as NEW on recovery; this is a comparison of collected evidence, not publication
+age. A malformed previous bundle is
+reported instead of silently treating the run as a first collection.
+
+The screen shows source counts, failures and saved paths. Individual failures
+(including Apple's intermittent 502/504 responses and timeouts) do not stop other
+sources; all-source failure exits 1 and still saves the errors. Successful or
+partially successful collection exits 0; configuration/save errors exit 2.
+Each source uses one fetch attempt through `lib/http.py` with `http.USER_AGENT`
+and a 5 MiB response limit. HTTPS redirects are followed through the shared opener;
+redirects to HTTP or other schemes are refused. Failed fetches are never retried.
+XML containing DOCTYPE or ENTITY declarations is rejected. No credentials, Naver calls, YouTube collection,
+scheduling, or automatic trend interpretation are involved.
+
+### Text sweep sources
+
+| Group | Source IDs | Listing / requested count |
+|---|---|---|
+| overseas | `producthunt` | Product Hunt Atom (about 50) |
+| overseas | `hn_front_page`, `hn_week_top`, `hn_show` | Algolia: 30 front-page, 100 last-week stories, 60 last-week Show HN; no points floor |
+| overseas | `github_trending_weekly`, `github_trending_daily` | GitHub trending HTML, available entries |
+| overseas | `huggingface_models`, `huggingface_spaces`, `huggingface_daily_papers` | Trending models/spaces: 40 each; daily papers: 50 |
+| overseas | `techmeme`, `lobsters` | Techmeme RSS; Lobsters hottest JSON |
+| overseas | `devto_top_week`, `devto_ai_week` | Weekly top articles / AI tag: 40 each |
+| overseas | `techcrunch_ai`, `techcrunch_startups` | AI and startups RSS |
+| overseas | `google_trends_us`, `wikipedia_en_top` | US trends RSS; English Wikipedia top 50 articles |
+| overseas | `appstore_us_top_free` | US App Store top 50 free apps |
+| overseas | `mastodon_links`, `mastodon_tags` | mastodon.social trending links/tags: 10 each |
+| overseas | `reddit_sideproject`, `reddit_saas` | Arctic Shift recent listings: 100 each; archive scores may lag |
+| korea | `geeknews`, `yozm_it`, `platum`, `venturesquare`, `byline_network` | GeekNews Atom; Korean IT/startup RSS |
+| korea | `aitimes`, `etnews`, `zdnet_korea`, `bloter`, `tech42`, `startuprecipe` | Korean news RSS |
+| korea | `google_trends_kr`, `wikipedia_ko_top` | Korean trends RSS; Korean Wikipedia top 50 articles |
+| korea | `appstore_kr_top_free`, `applemusic_kr` | Korean top 50 free apps / most-played songs |
+| korea | `reddit_korea` | Arctic Shift recent r/korea listings: 100; English-language perspective |
+| video | `knowyourmeme_news`, `knowyourmeme_memes` | Know Your Meme news and meme RSS only |
+
+Apple ranking items leave `date` empty; the app/song release date is retained in
+`extra.release_date`. Reddit listings exclude removed/deleted posts and posts with
+`removed_by_category`, then sort by score descending, preserving newest-first
+order on score ties. `fetched` counts the parser's surviving items; no raw-response
+count is added. Invalid item dates are left empty without dropping other results.
+Summary metrics put the label first (for example, `rank 1` or `points 532`).
+
+Wikipedia uses UTC two days ago to allow for publication lag, excludes main and
+namespace pages, and preserves actual article titles containing colons. GitHub
+layout changes producing no repository rows are recorded as errors. Adding a
+source using an existing parser requires one `Source(...)` row in
+`skills/last30days/scripts/lib/trend_sources.py`.
+
 ## Trend monitoring (`--store` + watchlist + briefings)
 
 The default behavior - one slug-named file per topic, overwritten on rerun - is the snapshot mode. For continuous monitoring, the repo ships three components most users miss:

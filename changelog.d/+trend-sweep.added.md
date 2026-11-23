@@ -1,0 +1,1 @@
+Added a standalone text trend sweep with 40 registered sources, concurrent failure-isolated collection, bounded honest HTTP requests, URL deduplication, previous-bundle NEW markers, and private non-overwriting JSON and grouped Markdown summaries.

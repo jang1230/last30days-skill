@@ -342,7 +342,9 @@ def test_cli_sources_needs_no_config_or_network(capsys):
          mock.patch.object(http, 'open_request', side_effect=AssertionError('must not fetch')):
         assert cli.main(['sources']) == 0
     text = capsys.readouterr().out
-    assert len(text.splitlines()) == len(sources.SOURCES) == 40
+    assert len(sources.SOURCES) == 40
+    assert len(text.splitlines()) == 42
+    assert 'youtube_chart_kr' in text and 'youtube_search_kr' in text
     assert all(s.id in text for s in sources.SOURCES)
 
 
@@ -713,3 +715,236 @@ def test_new_cross_source_shared_urls_use_previous_pairs_and_urls(old_titles, ne
     current = bundle([item(title, source='hn_front_page', url=url) for title in new_titles])
     sweep.mark_new(current, previous)
     assert [e['new'] for e in current['items']] == expected
+
+
+# Stage 2: all API payloads below are synthetic, never captured YouTube data.
+from tests.test_youtube_data import FAKE_KEY, collected as youtube_fixture, fake_response, synthetic_responses
+from lib import youtube_data
+
+
+def test_youtube_separate_private_files_numbering_new_and_summary(tmp_path):
+    youtube = youtube_fixture()
+    first = sweep.save_bundle(bundle([item('meme', 'knowyourmeme_news', 'video')]), tmp_path,
+                              youtube=youtube, per_source=1)
+    original = {k: p.read_bytes() for k, p in first.items()}
+    assert first['youtube'].name == 'trend-sweep-2026-11-20-youtube.json'
+    text = json.loads(first['json'].read_text())
+    assert all(not e['source'].startswith('youtube') for e in text['items'])
+    assert 'youtube' not in text
+    data = json.loads(first['youtube'].read_text())
+    assert len(data['items']) == 5 and not any(e['new'] for e in data['items'])
+    assert data['delete_by'] == '2026-12-20'
+    md = first['video'].read_text()
+    assert md.index('knowyourmeme_news') < md.index('## youtube_chart_kr') < md.index('## youtube_search_kr: AI')
+    assert 'views 123 · short · 연습 채널' in md
+    assert '2 more in YouTube JSON' in md and '1 more in YouTube JSON' in md
+    assert '1 search calls; 2 video-list units' in md
+    assert md.endswith(sweep.GUIDANCE)
+    second_data = youtube_fixture()
+    second_data['items'][0]['metric']['value'] = 99999  # Counts never affect NEW.
+    second_data['items'][1]['url'] = 'https://www.youtube.com/watch?v=vid00000099'
+    second = sweep.save_bundle(bundle(), tmp_path, youtube=second_data)
+    saved = json.loads(second['youtube'].read_text())
+    assert [e['new'] for e in saved['items']] == [False, True, False, False, False]
+    assert saved['previous_bundle'] == str(first['youtube'])
+    assert second['youtube'].name == 'trend-sweep-2026-11-20-2-youtube.json'
+    assert sweep.previous_bundle(tmp_path)[0] == second['json']
+    assert all(p.read_bytes() == original[k] for k, p in first.items())
+    if os.name == 'posix':
+        assert all(p.stat().st_mode & 0o777 == 0o600 for p in second.values())
+
+
+@pytest.mark.parametrize('failure_stage', ['youtube', 'json'])
+def test_youtube_save_failure_rolls_back_sidecar_and_temporaries(tmp_path, failure_stage):
+    publish = sweep._publish_json
+    def fail(staged, target):
+        # The final name is absent until complete JSON can be parsed.
+        assert not target.exists()
+        assert json.loads(staged.read_text())['schema'] == 1
+        if (target.name.endswith('-youtube.json')) == (failure_stage == 'youtube'):
+            raise OSError('synthetic publish failure')
+        publish(staged, target)
+    with mock.patch.object(sweep, '_publish_json', side_effect=fail), pytest.raises(OSError):
+        sweep.save_bundle(bundle(), tmp_path, youtube=youtube_fixture())
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_existing_youtube_sidecar_reserves_suffix_without_overwrite(tmp_path):
+    old = tmp_path / 'trend-sweep-2026-11-20-youtube.json'
+    old.write_text(json.dumps(youtube_fixture()))
+    original = old.read_bytes()
+    saved = sweep.save_bundle(bundle(), tmp_path, youtube=youtube_fixture())
+    assert saved['json'].name == 'trend-sweep-2026-11-20-2.json'
+    assert old.read_bytes() == original
+
+
+def test_youtube_previous_selection_uses_latest_valid_name_and_not_text(tmp_path):
+    first = sweep.save_bundle(bundle(), tmp_path, youtube=youtube_fixture())
+    (tmp_path / 'trend-sweep-2026-11-20-9-youtube.json').touch()
+    (tmp_path / '.trend-sweep-2026-11-20-10-youtube.json.tmp').write_text('unfinished')
+    second = sweep.save_bundle(bundle(), tmp_path)  # Text-only run is irrelevant.
+    current = youtube_fixture()
+    sweep.mark_youtube_new(current, tmp_path)
+    assert current['previous_bundle'] == str(first['youtube'])
+    assert sweep.previous_bundle(tmp_path)[0] == second['json']
+    assert not any(e['new'] for e in current['items'])
+
+
+def test_youtube_retention_filename_date_boundary_and_only_designated_files(tmp_path):
+    expired = ['trend-sweep-2026-10-20-youtube.json', 'trend-sweep-2026-10-20-2-video.md']
+    kept = ['trend-sweep-2026-10-21-youtube.json', 'trend-sweep-2026-10-21-video.md',
+            'trend-sweep-2026-11-20-youtube.json', 'trend-sweep-2026-10-20.json',
+            'trend-sweep-2026-10-20-overseas.md', 'trend-sweep-2026-10-20-korea.md',
+            'unrelated-youtube.json', 'trend-sweep-2026-99-99-video.md',
+            '.trend-sweep-2026-10-20-youtube.json.tmp', 'trend-sweep-2026-10-20-youtube.json.bak']
+    for name in expired + kept:
+        path = tmp_path / name
+        path.write_text('synthetic')
+        if name in kept:
+            os.utime(path, (0, 0))  # mtime must never control deletion.
+    deleted = sweep.delete_expired_youtube(tmp_path, today=NOW.date())
+    assert {p.name for p in deleted} == set(expired)
+    assert {p.name for p in tmp_path.iterdir()} == set(kept)
+
+
+@pytest.mark.parametrize('disabled', [False, True])
+def test_cli_skip_youtube_still_deletes_expired_and_reports(tmp_path, capsys, disabled):
+    expired = tmp_path / 'trend-sweep-2000-01-01-video.md'
+    expired.write_text('old synthetic data')
+    args = ['collect', '--save-dir', str(tmp_path)] + (['--no-youtube'] if disabled else [])
+    with mock.patch.object(sweep, 'collect', return_value=bundle()), \
+         mock.patch.object(cli, '_configured_youtube_key', side_effect=AssertionError('must not read key') if disabled else None,
+                           return_value=None), \
+         mock.patch.object(http, 'open_request', side_effect=AssertionError('no network')):
+        assert cli.main(args) == 0
+    output = capsys.readouterr().out
+    assert f'Deleted: {expired}' in output and not expired.exists()
+    reason = '--no-youtube' if disabled else 'YOUTUBE_API_KEY is not configured'
+    assert f'YouTube skipped: {reason}' in output
+    md = next(tmp_path.glob('*-video.md')).read_text()
+    assert f'YouTube skipped: {reason}'.replace('_', r'\_') in md
+    assert not list(tmp_path.glob('*-youtube.json'))
+
+
+def test_key_environment_and_config_precedence_without_keychain_pass(tmp_path, monkeypatch):
+    with mock.patch.object(cli.env, '_load_config_files', return_value=(
+            {'YOUTUBE_API_KEY': 'obviously-fake-user-key'}, {'YOUTUBE_API_KEY': 'obviously-fake-project-key'}, None)), \
+         mock.patch.object(cli.env, '_load_keychain', side_effect=AssertionError('Keychain forbidden')), \
+         mock.patch.object(cli.env, '_load_pass', side_effect=AssertionError('pass forbidden')), \
+         mock.patch.object(cli.env, 'get_config', side_effect=AssertionError('get_config forbidden')):
+        assert cli._configured_youtube_key() == 'obviously-fake-project-key'
+        monkeypatch.setenv('YOUTUBE_API_KEY', FAKE_KEY)
+        assert cli._configured_youtube_key() == FAKE_KEY
+        with mock.patch.object(sweep, 'collect', return_value=bundle()), \
+             mock.patch.object(http, 'open_request', return_value=fake_response({'items': []})):
+            assert cli.main(['collect', '--save-dir', str(tmp_path), '--youtube-searches', '0']) == 0
+    cli.env.CONFIG_FILE.write_text(f'YOUTUBE_API_KEY={FAKE_KEY}\n')
+    monkeypatch.delenv('YOUTUBE_API_KEY')
+    assert cli._configured_youtube_key() == FAKE_KEY
+
+
+def test_cli_youtube_topics_cap_and_key_never_in_output_or_files(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('YOUTUBE_API_KEY', FAKE_KEY)
+    with mock.patch.object(sweep, 'collect', return_value=bundle()), \
+         mock.patch.object(http, 'open_request', side_effect=[fake_response(v) for v in synthetic_responses()]) as opened:
+        assert cli.main(['collect', '--save-dir', str(tmp_path), '--youtube-topics', 'AI,밈,리뷰', '--youtube-searches', '1']) == 0
+    assert opened.call_count == 3
+    captured = capsys.readouterr()
+    assert 'Unchecked topics: 밈, 리뷰' in captured.out
+    assert '1 search calls; 2 video-list units' in captured.out
+    assert captured.out.count('Saved:') == 5
+    assert FAKE_KEY not in captured.out + captured.err
+    for path in tmp_path.iterdir():
+        assert FAKE_KEY not in path.read_text()
+    youtube = json.loads(next(tmp_path.glob('*-youtube.json')).read_text())
+    assert youtube['unchecked_topics'] == ['밈', '리뷰']
+    assert 'Unchecked topics: 밈, 리뷰' in next(tmp_path.glob('*-video.md')).read_text()
+
+
+def test_cli_youtube_failure_scrubs_echoed_key_and_does_not_change_exit(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('YOUTUBE_API_KEY', FAKE_KEY)
+    error = HTTPError('https://www.googleapis.com/?key=' + FAKE_KEY, 403,
+                      'quota exceeded at https://example.test/?key=' + FAKE_KEY, {}, io.BytesIO(b''))
+    with mock.patch.object(sweep, 'collect', return_value=bundle()), \
+         mock.patch.object(http, 'open_request', side_effect=error) as opened:
+        assert cli.main(['collect', '--save-dir', str(tmp_path)]) == 0
+    opened.assert_called_once()
+    output = capsys.readouterr()
+    assert '403' in output.out and '[REDACTED]' in output.out
+    assert FAKE_KEY not in output.out + output.err
+    assert all(FAKE_KEY not in p.read_text() for p in tmp_path.iterdir())
+    assert not json.loads(next(tmp_path.glob('*-youtube.json')).read_text())['items']
+
+
+def test_youtube_summary_escapes_external_structure_and_preserves_url():
+    youtube = youtube_fixture()
+    youtube['items'][0]['title'] = '# [evil](url) **bold** `code` <script> | table\nnext'
+    youtube['items'][0]['extra']['channel'] = '_channel_'
+    md = '\n'.join(sweep.render_youtube(youtube))
+    assert r'\# \[evil\](url) \*\*bold\*\* \`code\` \<script\> \| table next' in md
+    assert r'\_channel\_' in md
+    assert '<https://www.youtube.com/watch?v=vid00000001>' in md
+
+
+def test_no_youtube_preserves_meme_summary(tmp_path):
+    data = bundle([item('meme', 'knowyourmeme_news', 'video')])
+    with mock.patch.object(sweep, 'collect', return_value=data), \
+         mock.patch.object(cli, '_configured_youtube_key', side_effect=AssertionError('key read')):
+        assert cli.main(['collect', '--save-dir', str(tmp_path), '--no-youtube']) == 0
+    text = next(tmp_path.glob('*-video.md')).read_text()
+    assert 'Title meme' in text and 'YouTube skipped: --no-youtube' in text
+
+
+def test_youtube_success_does_not_mask_all_text_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv('YOUTUBE_API_KEY', FAKE_KEY)
+    data = bundle([])
+    data['sources'] = [{'id': 'producthunt', 'group': 'overseas', 'fetched': 0, 'kept': 0}]
+    data['errors'] = {'producthunt': 'synthetic text failure'}
+    with mock.patch.object(sweep, 'collect', return_value=data), \
+         mock.patch.object(http, 'open_request', return_value=fake_response(synthetic_responses()[0])):
+        assert cli.main(['collect', '--save-dir', str(tmp_path), '--youtube-searches', '0']) == 1
+    assert json.loads(next(tmp_path.glob('*-youtube.json')).read_text())['items']
+
+
+def test_invalid_previous_youtube_is_reported_without_failing_text_save(tmp_path):
+    old = tmp_path / 'trend-sweep-2026-11-19-youtube.json'
+    old.write_text('invalid synthetic JSON')
+    paths = sweep.save_bundle(bundle(), tmp_path, youtube=youtube_fixture())
+    result = json.loads(paths['youtube'].read_text())
+    assert 'Invalid previous bundle' in result['errors']['previous_youtube']
+    assert not any(e['new'] for e in result['items'])
+    assert old.read_text() == 'invalid synthetic JSON'
+
+
+@pytest.mark.parametrize('code', [400, 401, 403])
+def test_cli_and_video_summary_report_youtube_early_stop(tmp_path, monkeypatch, capsys, code):
+    monkeypatch.setenv('YOUTUBE_API_KEY', FAKE_KEY)
+    error = HTTPError('https://www.googleapis.com/youtube/v3/videos', code,
+                      'invalid credentials', {}, io.BytesIO(b''))
+    with mock.patch.object(sweep, 'collect', return_value=bundle()), \
+         mock.patch.object(http, 'open_request', side_effect=error) as opened:
+        assert cli.main(['collect', '--save-dir', str(tmp_path), '--youtube-topics', 'A,B']) == 0
+    opened.assert_called_once()
+    message = 'YouTube requests were stopped early'
+    assert message in capsys.readouterr().out
+    md = next(tmp_path.glob('*-video.md')).read_text()
+    assert message in md and 'Unchecked topics: A, B' in md
+    youtube = json.loads(next(tmp_path.glob('*-youtube.json')).read_text())
+    assert youtube['stopped'] and not youtube['quota_stopped']
+
+
+def test_youtube_headings_escape_only_topic_text():
+    youtube = youtube_fixture()
+    topic = '# _topic_ [link](bad)\n## next'
+    youtube['sections'][1]['topic'] = topic
+    md = '\n'.join(sweep.render_youtube(youtube))
+    assert '## youtube_chart_kr (3 fetched)' in md
+    assert r'## youtube_search_kr: \# \_topic\_ \[link\](bad) \#\# next (0 fetched)' in md
+    assert r'youtube\_' not in md
+    assert '\n## next' not in md
+
+
+def test_successful_youtube_status_does_not_report_early_stop():
+    youtube = youtube_fixture()
+    assert not youtube['stopped']
+    assert not any('stopped early' in line for line in sweep.youtube_status(youtube))

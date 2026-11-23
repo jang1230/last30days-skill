@@ -12,15 +12,15 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 ATOM = "{http://www.w3.org/2005/Atom}"
 
 
-def fetch(url, *, timeout=20) -> tuple[str | None, str | None]:
+def fetch(url, *, timeout=20, max_body_bytes=MAX_BODY_BYTES) -> tuple[str | None, str | None]:
     """Fetch feed text using the honest client name; reject oversized bodies."""
     try:
         text = http.request("GET", url, timeout=timeout, raw=True,
                             headers={"User-Agent": http.USER_AGENT})
         if not isinstance(text, str):
             return None, "Feed fetch failed: expected a text response"
-        if len(text.encode("utf-8")) > MAX_BODY_BYTES:
-            return None, "Feed body exceeds 2 MB"
+        if len(text.encode("utf-8")) > max_body_bytes:
+            return None, f"Feed body exceeds {max_body_bytes / (1024 * 1024):g} MB"
         return text, None
     except Exception as exc:
         return None, f"Feed fetch failed: {exc}"
@@ -64,11 +64,36 @@ def without_utm(url: str) -> str:
     return urlunsplit(parts._replace(query=urlencode(query)))
 
 
-def parse_entries(xml_text) -> list[dict]:
-    """Parse Atom entries, refusing DTDs and custom entity declarations."""
+def parse_entries(xml_text, *, max_body_bytes=None) -> list[dict]:
+    """Parse Atom or RSS 2.0, refusing oversized XML and declarations."""
+    if max_body_bytes is not None and len(xml_text.encode("utf-8")) > max_body_bytes:
+        raise ValueError(f"Feed body exceeds {max_body_bytes / (1024 * 1024):g} MB")
+    if "\x00" in xml_text:
+        raise ValueError("NUL bytes are not allowed in XML text")
     if re.search(r"<!DOCTYPE|<!ENTITY", xml_text, re.IGNORECASE):
         raise ValueError("DOCTYPE and ENTITY declarations are not allowed")
     root = ET.fromstring(xml_text)
+    if root.tag == "rss":
+        channel = root.find("channel")
+        if channel is None:
+            raise ValueError("Expected an RSS channel")
+        entries = []
+        for item in channel.findall("item"):
+            news = [node.text or "" for node in item.iter()
+                    if node.tag.rsplit("}", 1)[-1] == "news_item_title"]
+            traffic = next((node.text or "" for node in item
+                            if node.tag.rsplit("}", 1)[-1] == "approx_traffic"), "")
+            entries.append({
+                "id": item.findtext("guid", default="").strip(),
+                "title": item.findtext("title", default="").strip(),
+                "link": item.findtext("link", default="").strip(),
+                "published": item.findtext("pubDate", default="").strip(),
+                "updated": "",
+                "content": item.findtext("description", default="").strip(),
+                "author": item.findtext("author", default="").strip(),
+                "approx_traffic": traffic, "news_titles": news,
+            })
+        return entries
     if root.tag != ATOM + "feed":
         raise ValueError("Expected an Atom feed")
     entries = []

@@ -81,3 +81,12 @@ def test_fetch_preserves_failure_cause(error, reason):
     with mock.patch.object(http, "request", side_effect=error):
         assert atom_read.fetch(producthunt.FEED_URL) == (None, f"Feed fetch failed: {reason}")
         assert producthunt.fetch_feed() == {"items": [], "errors": [f"Feed fetch failed: {reason}"]}
+
+
+def test_atom_fetch_custom_size_cap_preserves_default():
+    body = '한' * 800000
+    with mock.patch.object(http, 'request', return_value=body):
+        assert '2 MB' in atom_read.fetch(producthunt.FEED_URL)[1]
+        assert atom_read.fetch(producthunt.FEED_URL, max_body_bytes=5 * 1024 * 1024) == (body, None)
+        assert atom_read.fetch(producthunt.FEED_URL, max_body_bytes=len(body.encode('utf-8')))[1] is None
+        assert atom_read.fetch(producthunt.FEED_URL, max_body_bytes=len(body.encode('utf-8')) - 1)[1]
